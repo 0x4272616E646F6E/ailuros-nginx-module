@@ -112,7 +112,11 @@ func Up(t *testing.T, cfg Config) *Stack {
 			// and print before the log is read.
 			_, _ = s.compose("stop", "--timeout", "30", "nginx")
 		}
-		log := s.logs()
+		log, logErr := s.nginxLogs()
+		if sanitized && logErr != nil {
+			// An empty log from a failed read is not a clean run.
+			t.Errorf("read nginx log of %s: %v\n%s", s.project, logErr, log)
+		}
 		if marker := sanitizerReport(log); marker != "" {
 			t.Errorf("nginx reported %q (sanitizer error); log of %s:\n%s", marker, s.project, log)
 		} else if t.Failed() {
@@ -136,7 +140,11 @@ func Up(t *testing.T, cfg Config) *Stack {
 
 // sanitizerMarkers are what AddressSanitizer (including LeakSanitizer) and
 // UBSan print to stderr when they find an error.
-var sanitizerMarkers = []string{"ERROR: AddressSanitizer", "ERROR: LeakSanitizer", "runtime error:"}
+var sanitizerMarkers = []string{
+	"ERROR: AddressSanitizer", "ERROR: LeakSanitizer", "runtime error:",
+	"LeakSanitizer has encountered a fatal error",
+	"SUMMARY: AddressSanitizer", "SUMMARY: UndefinedBehaviorSanitizer",
+}
 
 // sanitizerReport returns the first sanitizer marker found in an NGINX log.
 func sanitizerReport(log string) string {
@@ -401,9 +409,14 @@ func (s *Stack) Exec(t *testing.T, args ...string) (string, error) {
 
 // ErrorLog returns NGINX's error log (stderr) so far.
 func (s *Stack) ErrorLog() string {
-	out, _ := run(30*time.Second, "docker", "compose", "-p", s.project, "-f", s.file,
-		"logs", "--no-color", "--no-log-prefix", "nginx")
+	out, _ := s.nginxLogs()
 	return out
+}
+
+// nginxLogs is ErrorLog with the error of reading it.
+func (s *Stack) nginxLogs() (string, error) {
+	return run(30*time.Second, "docker", "compose", "-p", s.project, "-f", s.file,
+		"logs", "--no-color", "--no-log-prefix", "nginx")
 }
 
 func (s *Stack) logs() string { return s.ErrorLog() }

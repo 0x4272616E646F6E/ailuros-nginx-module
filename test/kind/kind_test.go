@@ -35,8 +35,35 @@ const (
 	// (as in the contract test). The kind node pulls it.
 	ailurosImage = "ghcr.io/0x4272616e646f6e/ailuros@sha256:b7540bacf0a1729bba473f728119157cc584f28449aa52b763d5e502f41db273"
 	ngfChart     = "oci://ghcr.io/nginx/charts/nginx-gateway-fabric"
-	ngfVersion   = "2.8.0" // deploy/ngf/ is written for this release
+	// configMapPrefix starts the module ConfigMap's name in
+	// deploy/ngf/helm-values-patch.yaml; the NGF version follows it.
+	configMapPrefix = "ailuros-nginx-module-ngf"
 )
+
+var configMapRE = regexp.MustCompile(regexp.QuoteMeta(configMapPrefix) + `(\d+\.\d+\.\d+)`)
+
+// crdKustomization is the Gateway API CRD reference NGF documents for an
+// NGF release: its repository's config/crd/gateway-api/standard at the
+// release tag. NGF 2.x documents it that way; any other major version is
+// refused rather than guessed.
+func crdKustomization(ngf string) (string, error) {
+	if !strings.HasPrefix(ngf, "2.") {
+		return "", fmt.Errorf("no Gateway API CRD reference known for NGF %s: add one to crdKustomization in test/kind/kind_test.go", ngf)
+	}
+	return "https://github.com/nginx/nginx-gateway-fabric/config/crd/gateway-api/standard?ref=v" + ngf + "&timeout=120s", nil
+}
+
+// valuesPatchFor returns deploy/ngf/helm-values-patch.yaml with the module
+// ConfigMap's name carrying ngf instead of the NGF version deploy/ngf targets
+// (the newest versions.json row), and that deploy version. Nothing else changes.
+func valuesPatchFor(patch []byte, ngf string) (out []byte, deployNGF string, err error) {
+	m := configMapRE.FindSubmatch(patch)
+	if m == nil {
+		return nil, "", fmt.Errorf("helm-values-patch.yaml has no %s<version> ConfigMap name", configMapPrefix)
+	}
+	deployNGF = string(m[1])
+	return bytes.ReplaceAll(patch, []byte(configMapPrefix+deployNGF), []byte(configMapPrefix+ngf)), deployNGF, nil
+}
 
 type env struct {
 	kubeconfig string
@@ -96,11 +123,28 @@ func TestNGF(t *testing.T) {
 			t.Fatalf("%s is required for the kind test", tool)
 		}
 	}
+	// The versions.json row under test ($AILUROS_NGF). deploy/ngf targets the
+	// newest row; for any other row the NGF version in the ConfigMap name of
+	// the values patch is substituted, nothing else is changed.
 	ngf := harness.NGFVersion(t)
-	if ngf != ngfVersion {
-		t.Fatalf("deploy/ngf/ targets NGF %s, not %s", ngfVersion, ngf)
-	}
 	root := harness.RepoRoot(t)
+	crdURL, err := crdKustomization(ngf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	patch, err := os.ReadFile(filepath.Join(root, "deploy", "ngf", "helm-values-patch.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	patch, deployNGF, err := valuesPatchFor(patch, ngf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("NGF %s (deploy/ngf targets %s)", ngf, deployNGF)
+	valuesFile := filepath.Join(t.TempDir(), "helm-values-patch.yaml")
+	if err := os.WriteFile(valuesFile, patch, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	so := harness.ModuleSO(t)
 	arch := harness.DockerArch(t)
 
@@ -136,8 +180,7 @@ func TestNGF(t *testing.T) {
 	}
 
 	// Gateway API CRDs, as NGF's documentation installs them.
-	crds, err := e.cmd(t, 5*time.Minute, "", "kubectl", "--kubeconfig", e.kubeconfig, "--context", context_, "kustomize",
-		"https://github.com/nginx/nginx-gateway-fabric/config/crd/gateway-api/standard?ref=v"+ngfVersion+"&timeout=120s")
+	crds, err := e.cmd(t, 5*time.Minute, "", "kubectl", "--kubeconfig", e.kubeconfig, "--context", context_, "kustomize", crdURL)
 	if err != nil {
 		t.Fatalf("fetch Gateway API CRDs: %v\n%s", err, crds)
 	}
@@ -151,10 +194,11 @@ func TestNGF(t *testing.T) {
 	}
 	e.kubectlIn(t, cm, "apply", "-f", "-")
 
-	// NGF itself, with the documented values patch unmodified.
+	// NGF itself, with the documented values patch (the ConfigMap name carries
+	// this row's NGF version).
 	if out, err := e.cmd(t, 10*time.Minute, "", "helm", "install", "ngf", ngfChart,
-		"--version", ngfVersion, "-n", "nginx-gateway", "--create-namespace",
-		"-f", filepath.Join(root, "deploy", "ngf", "helm-values-patch.yaml"),
+		"--version", ngf, "-n", "nginx-gateway", "--create-namespace",
+		"-f", valuesFile,
 		"--kubeconfig", e.kubeconfig, "--kube-context", context_, "--wait", "--timeout", "8m"); err != nil {
 		t.Fatalf("helm install: %v\n%s", err, out)
 	} else {
@@ -182,7 +226,11 @@ func TestNGF(t *testing.T) {
 		if !strings.Contains(mounts, "/usr/lib/nginx/modules/ailuros") {
 			t.Fatalf("nginx container mounts: %s", mounts)
 		}
-		t.Logf("containers[0].name = %s; mounts: %s", name, mounts)
+		image := strings.TrimSpace(e.kubectl(t, "get", "deploy/gateway-nginx", "-o", "jsonpath={.spec.template.spec.containers[0].image}"))
+		if !strings.HasSuffix(image, ":"+ngf) {
+			t.Fatalf("data plane image %q, want tag %s (the chart pins the image to its own version)", image, ngf)
+		}
+		t.Logf("containers[0].name = %s, image %s; mounts: %s", name, image, mounts)
 	})
 
 	base := e.portForward(t, "svc/gateway-nginx", "80")

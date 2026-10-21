@@ -58,18 +58,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Install build dependencies
         if: matrix.build-mode == 'manual'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential libpcre2-dev libssl-dev zlib1g-dev
       - uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
           queries: security-extended
-      - name: Build the module (newest supported NGF only)
+      # Host-compiler build (not docker) so the CodeQL tracer sees the compile.
+      - name: Build the module (first versions.json row only)
         if: matrix.build-mode == 'manual'
         env:
           NGF: ${{ needs.versions.outputs.latest }}
-        run: make build NGF="$NGF" ARCH=amd64 VERSION=codeql
+        run: make build-host NGF="$NGF"
       - uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           category: /language:${{ matrix.language }}

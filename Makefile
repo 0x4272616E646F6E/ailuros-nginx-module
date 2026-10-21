@@ -16,7 +16,11 @@ BUILD_ARGS = --build-arg NGF_VERSION=$(NGF) \
 
 BUILD_ARGS_ASAN = --build-arg NGINX_VERSION=$(NGINX_VERSION) --build-arg NGINX_SHA256=$(NGINX_SHA256)
 
-.PHONY: build verify test test-asan test-contract test-kind cppcheck check-ngf clean
+# Host-compiler build for CodeQL tracing only; see scripts/build-host.sh.
+build-host: check-ngf
+	scripts/build-host.sh $(NGF)
+
+.PHONY: build-host build verify test test-asan test-contract test-kind cppcheck check-ngf clean
 
 check-ngf:
 	@command -v jq >/dev/null || { echo "jq is required but not installed" >&2; exit 1; }

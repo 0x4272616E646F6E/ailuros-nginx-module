@@ -57,6 +57,7 @@ type Call struct {
 type Stack struct {
 	project string
 	file    string
+	conf    string // host path of the http-level config NGINX includes
 	base    string // http://127.0.0.1:<port> of NGINX's 8080
 	control map[string]string
 	client  *http.Client
@@ -91,6 +92,7 @@ func Up(t *testing.T, cfg Config) *Stack {
 	s := &Stack{
 		project: "ailuros-mod-it-" + randomHex(t),
 		file:    file,
+		conf:    filepath.Join(dir, "default.conf"),
 		control: map[string]string{},
 		client: &http.Client{
 			Timeout:       20 * time.Second,
@@ -257,15 +259,15 @@ func (s *Stack) Get(t *testing.T, path string) *http.Response {
 	return s.Do(t, req)
 }
 
-// Do sends req to NGINX (its scheme and host are replaced). The returned
-// body is already read, so it need not be closed.
+// Do sends req to NGINX (its URL's scheme and host are replaced; req.Host,
+// if set, is sent as the Host header). The returned body is already read,
+// so it need not be closed.
 func (s *Stack) Do(t *testing.T, req *http.Request) *http.Response {
 	t.Helper()
 	u := *req.URL
 	base, _ := http.NewRequest(http.MethodGet, s.base, nil)
 	u.Scheme, u.Host = base.URL.Scheme, base.URL.Host
 	req.URL = &u
-	req.Host = ""
 	resp, err := s.client.Do(req)
 	if err != nil {
 		t.Fatalf("%s %s: %v", req.Method, u.String(), err)
@@ -277,6 +279,28 @@ func (s *Stack) Do(t *testing.T, req *http.Request) *http.Response {
 	}
 	resp.Body = io.NopCloser(bytes.NewReader(body))
 	return resp
+}
+
+// Reload replaces the http-level config with conf (the bind-mounted file is
+// rewritten in place) and sends the NGINX master SIGHUP. NGINX reports a
+// config that fails only in its error log, where the old config keeps
+// serving.
+func (s *Stack) Reload(t *testing.T, conf string) {
+	t.Helper()
+	if err := os.WriteFile(s.conf, []byte(conf), 0o644); err != nil {
+		t.Fatalf("rewrite config: %v", err)
+	}
+	// SIGHUP rather than nginx -s reload, which parses the new config first
+	// and refuses to signal when it is invalid.
+	if out, err := s.Exec(t, "sh", "-c", "kill -HUP $(cat /var/run/nginx/nginx.pid)"); err != nil {
+		t.Fatalf("reload: %v\n%s", err, out)
+	}
+}
+
+// Exec runs a command in the NGINX container as uid 101.
+func (s *Stack) Exec(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	return s.compose(append([]string{"exec", "-T", "nginx"}, args...)...)
 }
 
 // ErrorLog returns NGINX's error log (stderr) so far.

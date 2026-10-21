@@ -25,6 +25,11 @@ typedef struct {
 
 
 typedef struct {
+    ngx_int_t                 status_index;  /* $ailuros_request_status */
+} ngx_http_ailuros_main_conf_t;
+
+
+typedef struct {
     ngx_uint_t                done;
     ngx_uint_t                status;
     ngx_http_request_t       *subrequest;
@@ -54,6 +59,7 @@ static ngx_int_t ngx_http_ailuros_empty_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_http_ailuros_add_variables(ngx_conf_t *cf);
 static ngx_int_t ngx_http_ailuros_init(ngx_conf_t *cf);
+static void *ngx_http_ailuros_create_main_conf(ngx_conf_t *cf);
 static void *ngx_http_ailuros_create_loc_conf(ngx_conf_t *cf);
 static char *ngx_http_ailuros_merge_loc_conf(ngx_conf_t *cf, void *parent,
     void *child);
@@ -96,7 +102,7 @@ static ngx_http_module_t  ngx_http_ailuros_module_ctx = {
     ngx_http_ailuros_add_variables,        /* preconfiguration */
     ngx_http_ailuros_init,                 /* postconfiguration */
 
-    NULL,                                  /* create main configuration */
+    ngx_http_ailuros_create_main_conf,     /* create main configuration */
     NULL,                                  /* init main configuration */
 
     NULL,                                  /* create server configuration */
@@ -125,8 +131,6 @@ ngx_module_t  ngx_http_ailuros_module = {
 
 static ngx_str_t  ngx_http_ailuros_status_name =
     ngx_string("ailuros_request_status");
-
-static ngx_int_t  ngx_http_ailuros_status_index = NGX_ERROR;
 
 
 /*
@@ -227,6 +231,15 @@ ngx_http_ailuros_handler(ngx_http_request_t *r)
 
     sr->header_only = 1;
 
+    /*
+     * no error_page redirection in the subrequest: an inherited
+     * "error_page 502 = @fallback" or "error_page 502 =200 /page" would
+     * otherwise turn the proxy's 502/504 (Ailuros down) into a 2xx;
+     * intercepted upstream errors keep their own status
+     */
+
+    sr->error_page = 1;
+
     ctx->subrequest = sr;
 
     ngx_http_set_ctx(r, ctx, ngx_http_ailuros_module);
@@ -267,12 +280,14 @@ ngx_http_ailuros_done(ngx_http_request_t *r, void *data, ngx_int_t rc)
 
 
 /*
- * Whether the location that answered the subrequest (the last one it was in,
- * after any internal redirect) can only be reached internally: an
- * "internal" location, or a named one.  Anything else -- a catch-all
- * "location /" answering a URI with no location of its own, or a location
- * clients can also request -- is not Ailuros answering, so its status is
- * not a decision.
+ * Whether the location the subrequest ended in (after any internal
+ * redirect) is an "internal" location that is not named.  This does not
+ * prove that the location proxies to Ailuros; it rejects the configurations
+ * that would make a status come from somewhere else: a catch-all
+ * "location /" answering a URI with no location of its own, a location that
+ * clients can also request, and named locations (an auth subrequest has no
+ * legitimate way to reach one once error_page is off, e.g. via try_files).
+ * Anything rejected here is no decision.
  */
 
 static ngx_uint_t
@@ -283,7 +298,7 @@ ngx_http_ailuros_internal(ngx_http_request_t *r,
 
     clcf = ngx_http_get_module_loc_conf(ctx->subrequest, ngx_http_core_module);
 
-    if (clcf->internal == 1 || clcf->named) {
+    if (clcf->internal == 1 && !clcf->named) {
         return 1;
     }
 
@@ -360,15 +375,18 @@ no_decision:
 static ngx_int_t
 ngx_http_ailuros_store_status(ngx_http_request_t *r, ngx_uint_t status)
 {
-    u_char                     *p;
-    ngx_http_variable_value_t  *vv;
+    u_char                        *p;
+    ngx_http_variable_value_t     *vv;
+    ngx_http_ailuros_main_conf_t  *amcf;
 
     p = ngx_pnalloc(r->pool, NGX_INT_T_LEN);
     if (p == NULL) {
         return NGX_ERROR;
     }
 
-    vv = &r->variables[ngx_http_ailuros_status_index];
+    amcf = ngx_http_get_module_main_conf(r, ngx_http_ailuros_module);
+
+    vv = &r->variables[amcf->status_index];
 
     vv->len = ngx_sprintf(p, "%ui", status) - p;
     vv->data = p;
@@ -444,10 +462,20 @@ ngx_http_ailuros_empty_variable(ngx_http_request_t *r,
 }
 
 
+/*
+ * Runs after the main conf is created (ngx_http_block creates all
+ * configurations before calling preconfiguration).  The index is kept in
+ * the main conf, not a static, so that each cycle's workers use the index
+ * of the configuration they run, even after a reload that failed.
+ */
+
 static ngx_int_t
 ngx_http_ailuros_add_variables(ngx_conf_t *cf)
 {
-    ngx_http_variable_t  *var;
+    ngx_http_variable_t           *var;
+    ngx_http_ailuros_main_conf_t  *amcf;
+
+    amcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_ailuros_module);
 
     var = ngx_http_add_variable(cf, &ngx_http_ailuros_status_name, 0);
     if (var == NULL) {
@@ -456,9 +484,9 @@ ngx_http_ailuros_add_variables(ngx_conf_t *cf)
 
     var->get_handler = ngx_http_ailuros_empty_variable;
 
-    ngx_http_ailuros_status_index = ngx_http_get_variable_index(cf,
+    amcf->status_index = ngx_http_get_variable_index(cf,
                                                &ngx_http_ailuros_status_name);
-    if (ngx_http_ailuros_status_index == NGX_ERROR) {
+    if (amcf->status_index == NGX_ERROR) {
         return NGX_ERROR;
     }
 
@@ -482,6 +510,22 @@ ngx_http_ailuros_init(ngx_conf_t *cf)
     *h = ngx_http_ailuros_handler;
 
     return NGX_OK;
+}
+
+
+static void *
+ngx_http_ailuros_create_main_conf(ngx_conf_t *cf)
+{
+    ngx_http_ailuros_main_conf_t  *amcf;
+
+    amcf = ngx_pcalloc(cf->pool, sizeof(ngx_http_ailuros_main_conf_t));
+    if (amcf == NULL) {
+        return NULL;
+    }
+
+    amcf->status_index = NGX_ERROR;
+
+    return amcf;
 }
 
 

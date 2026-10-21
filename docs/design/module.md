@@ -2,7 +2,7 @@
 
 A dynamic NGINX module that asks [Ailuros](https://github.com/0x4272616E646F6E/ailuros) to allow or block each request on the routes it is attached to, alongside any `auth_request` check (such as tinyauth) on the same route. It is built for NGINX Gateway Fabric (NGF) and loaded into NGF's stock NGINX image from a ConfigMap: no custom images.
 
-Status: approved design, not yet implemented. This note becomes the design record once it ships.
+Status: implemented; this note is the design record (first release 0.1.0).
 
 ## Context
 
@@ -44,22 +44,22 @@ All are valid in `http`, `server` and `location`, and each level inherits from t
 
 | Directive | Default | Meaning |
 |---|---|---|
-| `ailuros_request <uri> \| off;` | `off` | Send a subrequest to `<uri>`, an internal location that `proxy_pass`es to Ailuros, before the request continues. The location must be `internal` and not named, and must answer itself: an internal redirect during the subrequest (`rewrite … last`, `try_files`, `X-Accel-Redirect`) makes the answer no decision. `error_page` is not applied in the subrequest, so the proxy's 502/504 stays a 502/504. |
+| `ailuros_request <uri> \| off;` | `off` | Send a subrequest to `<uri>`, an internal location that `proxy_pass`es to Ailuros, before the request continues. The location must be `internal` and not named, and must answer itself: no `rewrite`, `try_files`, `X-Accel-Redirect` or other internal redirect inside it. Any such redirect, and any answer from a location that is not internal, is no decision. `error_page` is not applied in the subrequest, so the proxy's 502/504 stays a 502/504. The shipped location sets `proxy_ignore_headers X-Accel-*`. |
 | `ailuros_request_set $variable <value>;` | none | After the subrequest, set `$variable` to `<value>` (which may use the subrequest's upstream variables, e.g. `$upstream_http_x_ailuros_request_id`). Like `auth_request_set`. |
 | `ailuros_request_unavailable closed \| open;` | `closed` | What happens when Ailuros gives no decision (below). |
 
-The module also provides a read-only variable, `$ailuros_request_status`: the status the subrequest returned, empty before the check runs. It doubles as the marker that the request has been checked (see "Once per client request").
+The module also provides a read-only variable, `$ailuros_request_status`: the status the subrequest returned, empty before the check runs. It is informational only. The decided outcome, which marks the request as checked (see "Once per client request"), is stored in a separate module-owned variable that configuration can neither read nor write: its name cannot be written in a variable reference and it is not changeable.
 
 ### Applying Ailuros's answer
 
-The subrequest's response body is discarded, as with `auth_request`; a route's `error_page` can render JSON bodies, as Ailuros's shipped NGINX example does.
+The 4xx passthrough is exactly 400, 403 and 413. The subrequest's response body is discarded, as with `auth_request`; a route's `error_page` can render JSON bodies, as Ailuros's shipped NGINX example does.
 
 | Subrequest result | Request gets |
 |---|---|
 | 2xx | continues |
-| 4xx from Ailuros (403 block, 400 malformed, 413) | that status |
+| 400, 403 (block) or 413 from Ailuros | that status |
 | 503 from Ailuros (its own fail-closed decision) | 503, whatever `ailuros_request_unavailable` says |
-| no decision: connection refused or timeout (the proxy's 502 or 504), any other 5xx, an unexpected 1xx or 3xx | `closed`: 503. `open`: continues, with a warning logged for every request let through. |
+| no decision: connection refused or timeout (the proxy's 502 or 504), any other 5xx, any other 4xx (such as the 404 of a missing internal location), an unexpected 1xx or 3xx, an answer from a location that is not internal or after an internal redirect | `closed`: 503, logged as an error. `open`: continues, with a warning logged for every request let through. |
 
 `AILUROS_FAILURE_MODE` covers model failures inside Ailuros; `ailuros_request_unavailable` covers Ailuros itself being unreachable or broken, as `failure_mode_allow` does for Envoy.
 
@@ -74,7 +74,7 @@ The handler runs in NGINX's preaccess phase, after `limit_req` and `limit_conn`.
 
 Consequences:
 
-- `satisfy any` cannot make Ailuros optional, and an Ailuros allow cannot stand in for tinyauth: `satisfy` combines only access-phase handlers.
+- `satisfy any` never skips Ailuros, because it runs in preaccess, and an Ailuros allow cannot stand in for tinyauth: `satisfy` combines only access-phase handlers. `allow` / `deny` and `auth_request` still combine as NGINX defines, so `satisfy any; allow all;` lets tinyauth be skipped: that is NGINX's behaviour, not the module's.
 - Rate limits protect Ailuros.
 - Scanners hitting tinyauth-protected routes are inspected even though tinyauth then redirects them to login.
 - Requests that `allow` / `deny` would reject are still sent to Ailuros first (a model call each, and visible in Ailuros's logs).
@@ -82,7 +82,8 @@ Consequences:
 ### Once per client request
 
 - The handler does nothing in subrequests (`r != r->main`), so tinyauth's `/auth` and `/_ailuros` itself are never checked, even when `ailuros_request` is inherited from `server`.
-- Internal redirects after the check (`error_page`, named locations such as `@error401`) reuse the result: the module stores the outcome in its indexed variable, and request variables survive internal redirects (module contexts do not).
+- Internal redirects after the check (`error_page`, named locations such as `@error401`) reuse the result: the module stores the outcome in its indexed variable, and request variables survive internal redirects (module contexts do not). The stored outcome is the decision, not the status, so a block stays a block and a fail-open pass is not logged twice.
+- With `ailuros_request` at server level, an `error_page` target that reaches preaccess therefore reuses the original decision: a block page is blocked again. Render block pages with `return`, or set `ailuros_request off;` there. The per-route `SnippetsFilter` (location context) avoids this and is the supported way to choose which routes are checked.
 - `rewrite … last` happens before preaccess, so the check runs once, in the rewritten location.
 
 ### Delivery: a ConfigMap, no image
@@ -97,11 +98,12 @@ Releases are immutable, so a published asset cannot be replaced.
 
 Installation on NGF (example manifests in `deploy/ngf/`):
 
-1. The ConfigMap, in the namespace where NGF runs the NGINX pods, as a remote kustomize resource from the release URL (or the release's YAML committed, if a direct file URL is not accepted).
+1. The ConfigMap, in the namespace where NGF runs the NGINX pods, as a remote kustomize resource from the release URL (or the release's YAML committed, if a direct file URL is not accepted). Apply it server-side (`kubectl apply --server-side`, or Flux, which does): client-side apply stores the object in the `last-applied-configuration` annotation, which is capped at 256 KiB, and the manifest is close to that.
 2. NGF's Helm values: `nginxGateway.snippets.enable: true` (snippets are off by default), and an `nginx.patches` entry mounting the ConfigMap read-only at `/usr/lib/nginx/modules/ailuros/` in the stock NGINX container. The patch must be `type: JSONPatch`, with an `add` to `/spec/template/spec/volumes/-` and an `add` to `/spec/template/spec/containers/0/volumeMounts/-` (`StrategicMerge` fails: NGF merges lists by index, so the patch overwrites NGF's own volumes and the Deployment is rejected). It addresses the nginx container by index (`containers/0`), which must be re-checked on each NGF upgrade. The ConfigMap name carries the NGF version, so a bump changes the pod template and rolls the pods.
 3. One Gateway-wide `SnippetsPolicy`:
    - `main`: `load_module /usr/lib/nginx/modules/ailuros/ngx_http_ailuros_module.so;`
    - `http.server`: the internal `location = /_ailuros` that proxies to Ailuros's forward-auth port, defined once per server (per-route definitions collide when one server has several rules)
+   - `http.server`: `proxy_hide_header X-Ailuros-Request-Id;`, so an upstream cannot spoof the header
    - `http.server`: `add_header X-Ailuros-Request-Id $ailuros_request_id always;`, at server level so routes keep server-level headers (a location-level `add_header` drops them), and empty, so not sent, where Ailuros is not attached
 4. A per-route `SnippetsFilter` in `http.server.location`: `ailuros-check` (closed) and `ailuros-check-open`:
    ```nginx
@@ -139,7 +141,7 @@ Go tests driving Docker, as in Ailuros:
 1. **Build.** The NGINX source for each version is checked against the pinned SHA-256. The module is compiled inside the stock NGF image with `--with-compat` and `-Wall -Wextra -Werror`, then loaded with `nginx -t`. cppcheck over the source.
 2. **Behaviour suite.** A compose stack: the stock NGF NGINX image with the `.so` mounted read-only and loaded from main-includes, as in production; a stub Ailuros whose answers each test sets; a tinyauth stub (401 and redirect); an echo upstream. Every stub records its calls. Cases:
    - every row of the answer table, under `closed` and `open`, including the fail-open warning;
-   - ordering and stacking: an Ailuros block means tinyauth is never called; an Ailuros allow followed by a tinyauth 401 still redirects; `satisfy any` with `allow` skips neither; `limit_req` rejects before Ailuros;
+   - ordering and stacking: an Ailuros block means tinyauth is never called; an Ailuros allow followed by a tinyauth 401 still redirects; `satisfy any` never skips Ailuros (`satisfy any; allow all;` still skips tinyauth, as NGINX defines); `limit_req` rejects before Ailuros;
    - exactly one Ailuros call across `error_page`, named locations and `rewrite … last`, and with the directive at `server` level, where `/auth` and `/_ailuros` must not trigger checks; `$ailuros_request_id` survives internal redirects;
    - GET, HEAD and POST: the body never reaches Ailuros and reaches the upstream intact; Ailuros sees the original method and URI; large headers, keepalive and concurrency; a client hanging up mid-check.
 3. **Sanitizers.** The same suite against the same NGINX version built on Debian with AddressSanitizer and UBSan (they do not work on the NGF image's Alpine).
@@ -179,3 +181,4 @@ Checked on kind (v0.33.0) with NGF 2.8.0 (Helm chart 2.8.0, Gateway API CRDs v1.
 ## History
 
 - 2026-10-21: Design approved: own preaccess handler next to `auth_request`, configurable `ailuros_request_unavailable` (default closed), headers only, delivered by ConfigMap into NGF's stock image.
+- 2026-10-21: Implemented as 0.1.0. Review-driven changes to the design as first written: the `ailuros_request` location must be `internal`, not named, and answer itself, and no `error_page` or internal redirect applies in the subrequest (any redirect is no decision); 4xx passthrough narrowed to exactly 400, 403 and 413; the decided outcome is stored in a separate module-owned variable instead of `$ailuros_request_status`; the handler is placed at index 0 of the preaccess array to run last in the phase; the policy hides `X-Ailuros-Request-Id` from upstreams (`proxy_hide_header`) and the shipped location ignores `X-Accel-*` headers; the `satisfy any` and server-level `error_page` consequences are documented.

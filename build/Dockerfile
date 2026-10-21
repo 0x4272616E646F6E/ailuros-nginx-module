@@ -46,7 +46,9 @@ RUN chmod 0555 /usr/lib/nginx/modules/ailuros \
         'load_module /usr/lib/nginx/modules/ailuros/ngx_http_ailuros_module.so;' \
         'pid /tmp/nginx.pid;' \
         'events {}' \
-        'http { server { listen 8080; ailuros on; } }' \
+        'http { server { listen 8080;' \
+        '    location = /_ailuros { internal; return 200; }' \
+        '    location / { ailuros_request /_ailuros; return 200; } } }' \
         > /tmp/verify.conf
 USER 101
 RUN nginx -t -c /tmp/verify.conf

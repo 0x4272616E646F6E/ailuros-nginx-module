@@ -13,12 +13,20 @@ package harness
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -59,6 +67,7 @@ type Stack struct {
 	file    string
 	conf    string // host path of the http-level config NGINX includes
 	base    string // http://127.0.0.1:<port> of NGINX's 8080
+	tlsAddr string // 127.0.0.1:<port> of NGINX's 8443
 	control map[string]string
 	client  *http.Client
 }
@@ -83,7 +92,7 @@ func Up(t *testing.T, cfg Config) *Stack {
 	dir := confDir(t, cfg.NGINXConf)
 	compose := fmt.Sprintf(composeTemplate, image, so, ModulePath,
 		filepath.Join(dir, "ailuros.conf"), filepath.Join(dir, "harness.conf"),
-		filepath.Join(dir, "default.conf"), stubImage, stubImage, stubImage)
+		filepath.Join(dir, "default.conf"), filepath.Join(dir, "tls"), stubImage, stubImage, stubImage)
 	file := filepath.Join(dir, "compose.yaml")
 	if err := os.WriteFile(file, []byte(compose), 0o644); err != nil {
 		t.Fatalf("write compose file: %v", err)
@@ -111,6 +120,7 @@ func Up(t *testing.T, cfg Config) *Stack {
 	}
 
 	s.base = "http://" + s.port(t, "nginx", "8080")
+	s.tlsAddr = s.port(t, "nginx", "8443")
 	for _, svc := range []string{"ailuros", "tinyauth", "echo"} {
 		s.control[svc] = "http://" + s.port(t, svc, "9999")
 	}
@@ -191,6 +201,7 @@ func CheckConfig(t *testing.T, conf string) (ok bool, output string) {
 		"-v", filepath.Join(dir, "ailuros.conf") + ":/etc/nginx/main-includes/ailuros.conf:ro",
 		"-v", filepath.Join(dir, "harness.conf") + ":/etc/nginx/main-includes/harness.conf:ro",
 		"-v", filepath.Join(dir, "default.conf") + ":/etc/nginx/conf.d/default.conf:ro",
+		"-v", filepath.Join(dir, "tls") + ":/etc/nginx/test-tls:ro",
 		StockImage(t), "-t"}
 	out, err := run(2*time.Minute, "docker", args...)
 	var exit *exec.ExitError
@@ -198,6 +209,51 @@ func CheckConfig(t *testing.T, conf string) (ok bool, output string) {
 		t.Fatalf("docker run: %v\n%s", err, out)
 	}
 	return err == nil, out
+}
+
+// SetAilurosRoutes makes the Ailuros stub answer with the status of the first
+// route whose key is a prefix of the request's X-Original-URI, instead of the
+// default answer's status.
+func (s *Stack) SetAilurosRoutes(status int, routes map[string]int) {
+	body, _ := json.Marshal(map[string]any{"status": status, "routes": routes})
+	resp, err := s.client.Post(s.control["ailuros"]+"/answer", "application/json", bytes.NewReader(body))
+	if err != nil {
+		panic(fmt.Sprintf("set ailuros routes: %v", err))
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		panic(fmt.Sprintf("set ailuros routes: status %d", resp.StatusCode))
+	}
+}
+
+// Base is NGINX's plain HTTP URL, http://127.0.0.1:<port>.
+func (s *Stack) Base() string { return s.base }
+
+// Client is the stack's default HTTP client (no redirects followed).
+func (s *Stack) Client() *http.Client { return s.client }
+
+// Dial opens a raw TCP connection to NGINX's 8080.
+func (s *Stack) Dial(t *testing.T) net.Conn {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", strings.TrimPrefix(s.base, "http://"), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial nginx: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	return conn
+}
+
+// TLSAddr is the host address of NGINX's TLS listener (container port 8443,
+// certificate /etc/nginx/test-tls/cert.pem and key.pem, generated per test).
+func (s *Stack) TLSAddr() string { return s.tlsAddr }
+
+// TLSClient is an HTTP client for NGINX's TLS listener that accepts the test
+// certificate and speaks HTTP/2 when the server offers it.
+func (s *Stack) TLSClient() *http.Client {
+	return &http.Client{
+		Timeout:   20 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, ForceAttemptHTTP2: true},
+	}
 }
 
 // SetAilurosAnswer makes the Ailuros stub answer every request with status,
@@ -366,6 +422,7 @@ func confDir(t *testing.T, conf string) string {
 	if err := os.Chmod(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	writeTestCert(t, filepath.Join(dir, "tls"))
 	files := map[string]string{
 		"ailuros.conf": "load_module " + ModulePath + ";\n",
 		// NGF raises the error log level the same way; warnings must be seen.
@@ -378,6 +435,41 @@ func confDir(t *testing.T, conf string) string {
 		}
 	}
 	return dir
+}
+
+// writeTestCert writes a self-signed certificate and key for localhost.
+func writeTestCert(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "localhost"},
+		DNSNames:     []string{"localhost"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, block := range map[string]*pem.Block{
+		"cert.pem": {Type: "CERTIFICATE", Bytes: der},
+		"key.pem":  {Type: "EC PRIVATE KEY", Bytes: keyDER},
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), pem.EncodeToMemory(block), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func buildStub(t *testing.T) {
@@ -461,8 +553,13 @@ const composeTemplate = `services:
         source: %s
         target: /etc/nginx/conf.d/default.conf
         read_only: true
+      - type: bind
+        source: %s
+        target: /etc/nginx/test-tls
+        read_only: true
     ports:
       - "127.0.0.1::8080"
+      - "127.0.0.1::8443"
     depends_on: [ailuros, tinyauth, echo]
   ailuros:
     image: %s

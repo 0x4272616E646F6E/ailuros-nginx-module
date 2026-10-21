@@ -421,6 +421,7 @@ func TestStoredDecisionNotWritable(t *testing.T) {
 		"map": `map $host $ailuros-request-outcome { default continue; }
 server { listen 8080; location / { return 200; } }`,
 		"ailuros_request_set": `server { listen 8080; ailuros_request_set $ailuros-request-outcome continue; location / { return 200; } }`,
+		"set":                 `server { listen 8080; location / { set $ailuros-request-outcome continue; return 200; } }`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			ok, out := harness.CheckConfig(t, conf)

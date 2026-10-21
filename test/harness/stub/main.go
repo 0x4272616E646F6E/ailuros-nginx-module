@@ -3,7 +3,9 @@
 // API on -control:
 //
 //	GET  /calls   the requests received so far, as JSON
-//	POST /answer  {"status": 403, "delay_ms": 0, "headers": {...}} (ailuros)
+//	POST /answer  {"status": 403, "delay_ms": 0, "headers": {...},
+//	              "routes": {"/block/": 403}} (ailuros; a route overrides the
+//	              status for requests whose X-Original-URI starts with its key)
 //	POST /stop    stop listening on -listen, so connections are refused
 //
 // Roles:
@@ -20,6 +22,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -35,6 +38,7 @@ type answer struct {
 	Status  int               `json:"status"`
 	DelayMS int               `json:"delay_ms"`
 	Headers map[string]string `json:"headers"`
+	Routes  map[string]int    `json:"routes"`
 }
 
 type state struct {
@@ -68,6 +72,12 @@ func main() {
 			s.mu.Lock()
 			a := s.answer
 			s.mu.Unlock()
+			orig := r.Header.Get("X-Original-URI")
+			for prefix, status := range a.Routes {
+				if strings.HasPrefix(orig, prefix) {
+					a.Status = status
+				}
+			}
 			if a.DelayMS > 0 {
 				select {
 				case <-time.After(time.Duration(a.DelayMS) * time.Millisecond):

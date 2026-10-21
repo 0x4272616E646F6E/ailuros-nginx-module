@@ -4,7 +4,8 @@
  * Asks Ailuros's HTTP forward-auth to allow or block each request on the
  * routes it is attached to.  The question is a subrequest to an internal
  * location that proxy_passes to Ailuros (headers only), sent from the
- * preaccess phase so the check is enforced next to auth_request.
+ * end of the preaccess phase: after limit_req and limit_conn, before
+ * allow/deny and auth_request, once per client request.
  *
  * The handler is modelled on NGINX's ngx_http_auth_request_module; the
  * differences are explained where they occur.
@@ -26,6 +27,7 @@ typedef struct {
 
 typedef struct {
     ngx_int_t                 status_index;  /* $ailuros_request_status */
+    ngx_int_t                 outcome_index; /* the decision, see below */
 } ngx_http_ailuros_main_conf_t;
 
 
@@ -53,6 +55,10 @@ static ngx_int_t ngx_http_ailuros_apply(ngx_http_request_t *r,
     ngx_uint_t internal);
 static ngx_int_t ngx_http_ailuros_store_status(ngx_http_request_t *r,
     ngx_uint_t status);
+static ngx_int_t ngx_http_ailuros_store_outcome(ngx_http_request_t *r,
+    ngx_int_t rc);
+static ngx_int_t ngx_http_ailuros_stored_outcome(ngx_http_request_t *r,
+    ngx_int_t *rc);
 static ngx_int_t ngx_http_ailuros_set_variables(ngx_http_request_t *r,
     ngx_http_ailuros_loc_conf_t *alcf, ngx_http_ailuros_ctx_t *ctx);
 static ngx_int_t ngx_http_ailuros_empty_variable(ngx_http_request_t *r,
@@ -132,6 +138,38 @@ ngx_module_t  ngx_http_ailuros_module = {
 static ngx_str_t  ngx_http_ailuros_status_name =
     ngx_string("ailuros_request_status");
 
+/*
+ * The decision taken for this client request, kept so that an internal
+ * redirect after the check (error_page, a named location such as
+ * tinyauth's @error401, X-Accel-Redirect from the upstream) reuses it
+ * instead of asking Ailuros again.
+ *
+ * Where it is kept: an indexed request variable owned by the module.
+ * ngx_http_internal_redirect() and ngx_http_named_location() both clear
+ * r->ctx (so the module ctx is gone after a redirect) but leave
+ * r->variables alone, which lives as long as the request; this is also
+ * how $ailuros_request_status and auth_request_set values survive.
+ *
+ * Why the decision and not $ailuros_request_status: the status alone does
+ * not say whether the answer counted.  A 200 from a location that is not
+ * internal, or after a redirect inside the subrequest, was "no decision";
+ * mapping the stored status again would turn it into "continue".  The
+ * decision also lets a fail-open pass be reused without logging its
+ * warning a second time for the same client request.
+ *
+ * The name contains "-", which no variable reference in the configuration
+ * can contain (ngx_http_script_compile() ends a name at it, braces or not),
+ * and the variable is NOHASH, so it is not found by name at run time
+ * either.  It is not CHANGEABLE, so "set", map, ailuros_request_set and
+ * the like cannot define it: they fail with "the duplicate variable".
+ * Only this module writes it.
+ */
+
+static ngx_str_t  ngx_http_ailuros_outcome_name =
+    ngx_string("ailuros-request-outcome");
+
+static ngx_str_t  ngx_http_ailuros_outcome_continue = ngx_string("continue");
+
 
 /*
  * Preaccess phase handler, run by ngx_http_core_generic_phase:
@@ -152,11 +190,17 @@ static ngx_str_t  ngx_http_ailuros_status_name =
  *
  * Unlike the access phase checker, the generic checker does not skip
  * subrequests, so this handler checks r != r->main itself.
+ *
+ * Once a decision is taken it is stored for the client request (see
+ * ngx_http_ailuros_outcome_name), and a later run of this handler for the
+ * same request, after an internal redirect, returns it again without a new
+ * subrequest and without logging again.
  */
 
 static ngx_int_t
 ngx_http_ailuros_handler(ngx_http_request_t *r)
 {
+    ngx_int_t                     rc;
     ngx_http_request_t           *sr;
     ngx_http_ailuros_ctx_t       *ctx;
     ngx_http_post_subrequest_t   *ps;
@@ -174,6 +218,22 @@ ngx_http_ailuros_handler(ngx_http_request_t *r)
 
     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                    "ailuros request handler");
+
+    /* once per client request: reuse the decision after a redirect */
+
+    switch (ngx_http_ailuros_stored_outcome(r, &rc)) {
+
+    case NGX_OK:
+        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                       "ailuros request reused decision %i", rc);
+        return rc;
+
+    case NGX_DECLINED:
+        break;
+
+    default:
+        return NGX_ERROR;
+    }
 
     ctx = ngx_http_get_module_ctx(r, ngx_http_ailuros_module);
 
@@ -195,8 +255,14 @@ ngx_http_ailuros_handler(ngx_http_request_t *r)
             return NGX_ERROR;
         }
 
-        return ngx_http_ailuros_apply(r, alcf, ctx->status,
-                                      ngx_http_ailuros_internal(r, alcf, ctx));
+        rc = ngx_http_ailuros_apply(r, alcf, ctx->status,
+                                    ngx_http_ailuros_internal(r, alcf, ctx));
+
+        if (ngx_http_ailuros_store_outcome(r, rc) != NGX_OK) {
+            return NGX_ERROR;
+        }
+
+        return rc;
     }
 
     ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_ailuros_ctx_t));
@@ -421,6 +487,94 @@ ngx_http_ailuros_store_status(ngx_http_request_t *r, ngx_uint_t status)
 }
 
 
+/*
+ * Stores what ngx_http_ailuros_apply() returned: "continue" for
+ * NGX_DECLINED, otherwise the status the request is finalized with (400,
+ * 403, 413 or 503).
+ */
+
+static ngx_int_t
+ngx_http_ailuros_store_outcome(ngx_http_request_t *r, ngx_int_t rc)
+{
+    u_char                        *p;
+    ngx_http_variable_value_t     *vv;
+    ngx_http_ailuros_main_conf_t  *amcf;
+
+    amcf = ngx_http_get_module_main_conf(r, ngx_http_ailuros_module);
+
+    vv = &r->variables[amcf->outcome_index];
+
+    if (rc == NGX_DECLINED) {
+        vv->len = ngx_http_ailuros_outcome_continue.len;
+        vv->data = ngx_http_ailuros_outcome_continue.data;
+
+    } else {
+        p = ngx_pnalloc(r->pool, NGX_INT_T_LEN);
+        if (p == NULL) {
+            return NGX_ERROR;
+        }
+
+        vv->len = ngx_sprintf(p, "%i", rc) - p;
+        vv->data = p;
+    }
+
+    vv->valid = 1;
+    vv->no_cacheable = 0;
+    vv->not_found = 0;
+
+    return NGX_OK;
+}
+
+
+/*
+ * NGX_OK with the stored decision in *rc, NGX_DECLINED when this client
+ * request has not been decided yet.  A stored value this module would not
+ * have written is an error (the request gets a 500), never a pass.
+ */
+
+static ngx_int_t
+ngx_http_ailuros_stored_outcome(ngx_http_request_t *r, ngx_int_t *rc)
+{
+    ngx_int_t                            n;
+    const ngx_http_variable_value_t     *vv;
+    const ngx_http_ailuros_main_conf_t  *amcf;
+
+    amcf = ngx_http_get_module_main_conf(r, ngx_http_ailuros_module);
+
+    vv = &r->variables[amcf->outcome_index];
+
+    if (!vv->valid) {
+        return NGX_DECLINED;
+    }
+
+    if (vv->len == ngx_http_ailuros_outcome_continue.len
+        && ngx_strncmp(vv->data, ngx_http_ailuros_outcome_continue.data,
+                       vv->len) == 0)
+    {
+        *rc = NGX_DECLINED;
+        return NGX_OK;
+    }
+
+    n = ngx_atoi(vv->data, vv->len);
+
+    switch (n) {
+
+    case NGX_HTTP_BAD_REQUEST:
+    case NGX_HTTP_FORBIDDEN:
+    case NGX_HTTP_REQUEST_ENTITY_TOO_LARGE:
+    case NGX_HTTP_SERVICE_UNAVAILABLE:
+        *rc = n;
+        return NGX_OK;
+
+    default:
+        ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
+                      "ailuros_request stored decision \"%*s\" is invalid",
+                      (size_t) vv->len, vv->data);
+        return NGX_ERROR;
+    }
+}
+
+
 static ngx_int_t
 ngx_http_ailuros_set_variables(ngx_http_request_t *r,
     ngx_http_ailuros_loc_conf_t *alcf, ngx_http_ailuros_ctx_t *ctx)
@@ -513,24 +667,66 @@ ngx_http_ailuros_add_variables(ngx_conf_t *cf)
         return NGX_ERROR;
     }
 
+    var = ngx_http_add_variable(cf, &ngx_http_ailuros_outcome_name,
+                                NGX_HTTP_VAR_NOHASH);
+    if (var == NULL) {
+        return NGX_ERROR;
+    }
+
+    var->get_handler = ngx_http_ailuros_empty_variable;
+
+    amcf->outcome_index = ngx_http_get_variable_index(cf,
+                                              &ngx_http_ailuros_outcome_name);
+    if (amcf->outcome_index == NGX_ERROR) {
+        return NGX_ERROR;
+    }
+
     return NGX_OK;
 }
 
 
+/*
+ * Registers the handler at index 0 of the preaccess handlers, so that it
+ * runs last in that phase: after limit_req and limit_conn (rate limits
+ * protect Ailuros), and before the access phase (allow/deny, auth_request).
+ *
+ * NGINX runs a phase's handlers in reverse registration order:
+ * ngx_http_init_phase_handlers() (src/http/ngx_http.c in 1.31.7) fills the
+ * phase engine with
+ *
+ *     for (j = cmcf->phases[i].handlers.nelts - 1; j >= 0; j--) {
+ *         ph->handler = h[j];
+ *         ...
+ *         ph++;
+ *     }
+ *
+ * so the last element runs first and element 0 runs last.  A dynamic module
+ * is initialized after the built-in ones, so a plain ngx_array_push() would
+ * put this handler last in the array, i.e. before limit_req and limit_conn.
+ * Instead the existing handlers are shifted up by one and this one is put
+ * in front.
+ */
+
 static ngx_int_t
 ngx_http_ailuros_init(ngx_conf_t *cf)
 {
+    ngx_array_t                *a;
     ngx_http_handler_pt        *h;
     ngx_http_core_main_conf_t  *cmcf;
 
     cmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
 
-    h = ngx_array_push(&cmcf->phases[NGX_HTTP_PREACCESS_PHASE].handlers);
-    if (h == NULL) {
+    a = &cmcf->phases[NGX_HTTP_PREACCESS_PHASE].handlers;
+
+    if (ngx_array_push(a) == NULL) {
         return NGX_ERROR;
     }
 
-    *h = ngx_http_ailuros_handler;
+    h = a->elts;
+
+    ngx_memmove(&h[1], &h[0], (a->nelts - 1) * sizeof(ngx_http_handler_pt));
+
+    h[0] = ngx_http_ailuros_handler;
 
     return NGX_OK;
 }
@@ -547,6 +743,7 @@ ngx_http_ailuros_create_main_conf(ngx_conf_t *cf)
     }
 
     amcf->status_index = NGX_ERROR;
+    amcf->outcome_index = NGX_ERROR;
 
     return amcf;
 }

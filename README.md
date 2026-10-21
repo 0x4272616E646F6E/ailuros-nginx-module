@@ -110,7 +110,12 @@ list of things to check. In short:
    NGF Helm values. It sets `nginxGateway.snippets.enable: true` and mounts
    the ConfigMap at `/usr/lib/nginx/modules/ailuros/` with a `JSONPatch` (not
    `StrategicMerge`) that addresses the nginx container as `containers/0`.
-   Re-check that index on every NGF upgrade.
+   Re-check that index on every NGF upgrade. The manifests in `deploy/ngf`
+   target the newest supported NGF release (the first row of
+   `versions.json`; 2.8.0 today). For an older supported release, use that
+   release's chart version and ConfigMap asset and change the version in the
+   ConfigMap name in `helm-values-patch.yaml` to match (`make test-kind NGF=<ngf>`
+   does exactly that substitution); see [deploy/ngf/README.md](deploy/ngf/README.md).
 4. Edit [snippetspolicy.yaml](deploy/ngf/snippetspolicy.yaml) (Gateway name and
    namespace, the Ailuros Service host) and
    [snippetsfilters.yaml](deploy/ngf/snippetsfilters.yaml) (the routes'
@@ -163,8 +168,10 @@ gh attestation verify ngx_http_ailuros_module-v0.1.0-ngf2.8.0-linux-amd64.so \
   --repo 0x4272616E646F6E/ailuros-nginx-module
 ```
 
-On macOS use `shasum -a 256 -c SHA256SUMS --ignore-missing`. Releases are
-immutable: a published asset cannot be replaced.
+On macOS use `shasum -a 256 -c SHA256SUMS --ignore-missing`. A release is
+published with all its assets in one step and is meant to be immutable, so a
+published asset is not replaced; see [CONTRIBUTING.md](CONTRIBUTING.md) for
+the repository setting that enforces it.
 
 ## Troubleshooting
 
@@ -199,9 +206,14 @@ immutable: a published asset cannot be replaced.
 Requires Docker with buildx, GNU Make and `jq`; Go for the test harness.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the test layers.
 
+`ARCH` defaults to `amd64`. The test suites run the module in containers of
+the host's architecture (`make test` loads the host-architecture `.so`), so on
+an arm64 host (Apple silicon, Linux aarch64) build with `ARCH=arm64` before
+testing. A shell-portable choice: `ARCH=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')`.
+
 | Command | What it does |
 |---|---|
-| `make build NGF=2.8.0 ARCH=amd64 VERSION=dev` | builds the `.so` inside NGF's stock image into `out/` |
+| `make build NGF=2.8.0 ARCH=<host arch> VERSION=dev` | builds the `.so` inside NGF's stock image into `out/` (build this before `make test`) |
 | `make verify NGF=2.8.0` | compiles with `-Werror` and loads it with `nginx -t` |
 | `make test` | repo, behaviour and contract suites |
 | `make test-asan` | the behaviour suite against an AddressSanitizer build |

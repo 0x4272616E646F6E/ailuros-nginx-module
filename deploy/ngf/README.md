@@ -1,8 +1,18 @@
 # Installing the module on NGINX Gateway Fabric
 
-Example manifests for NGF 2.8.0, applied unmodified by `make test-kind`
-(`test/kind/kind_test.go`). The module is a ConfigMap mounted into NGF's stock
-NGINX image; no custom image is run.
+Example manifests for NGF 2.8.0, the newest release in `versions.json`
+(a repo test keeps them in step). `make test-kind` applies them unmodified.
+The module is a ConfigMap mounted into NGF's stock NGINX image; no custom
+image is run.
+
+**Another supported NGF release.** The only version-specific parts are the
+chart version you install and the ConfigMap name in `helm-values-patch.yaml`
+(`ailuros-nginx-module-ngf<ngf>`). For an older row of `versions.json`, install
+that chart version, use that release's ConfigMap asset and change the version
+in the name. `make test-kind NGF=<ngf>` makes exactly that substitution (in a
+temporary copy) and installs the matching chart, so every row is tested.
+When `deploy/ngf` moves to a newer release, update the version in every file
+here (`test/repo` checks that they agree with `versions.json`).
 
 | File | What it does |
 |---|---|
@@ -73,6 +83,10 @@ Routes without a filter are never sent to Ailuros and carry no
   internal redirect inside the subrequest, and `error_page` does not apply
   there, so do not add `rewrite` or `try_files`. The timeouts (1s connect,
   1500ms read) are Ailuros's default 1s classifier timeout plus 500ms.
+- **`location = /_ailuros` is reserved on every server of the Gateway.** The
+  policy defines it in each server, so a client request for the exact path
+  `/_ailuros` gets 404 (it is `internal`) and an application route on that
+  path is shadowed. Do not use `/_ailuros` for your own routes.
 - **`add_header X-Ailuros-Request-Id` is at server level, once.** A
   location-level `add_header` would drop the server-level headers of every
   route.

@@ -499,7 +499,9 @@ func (s *Stack) waitReady(t *testing.T) {
 		for {
 			resp, err := s.client.Get(u)
 			if err == nil {
-				ok := resp.StatusCode < 300
+				// Any answer shows NGINX and the stubs are up; only Ailuros's
+				// readiness endpoint has to say yes.
+				ok := u != s.admin+"/readyz" || resp.StatusCode == http.StatusOK
 				resp.Body.Close()
 				if ok {
 					break

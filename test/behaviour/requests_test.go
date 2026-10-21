@@ -210,9 +210,10 @@ func TestExpectContinue(t *testing.T) {
 		if !strings.HasPrefix(line, "HTTP/1.1 403") {
 			t.Fatalf("first line = %q, want 403 with no 100 Continue before it", line)
 		}
-		// The client, having had no 100, sends no body. Anything it sends
-		// regardless must not reach the upstream either.
-		time.Sleep(300 * time.Millisecond)
+		// A client that sends the body regardless (the write may fail once
+		// NGINX closes) must not get it to the upstream either.
+		_, _ = conn.Write(body)
+		time.Sleep(500 * time.Millisecond)
 		if got := len(stack.AilurosCalls()) - ailurosBefore; got != 1 {
 			t.Errorf("ailuros calls = %d, want 1", got)
 		}
@@ -286,14 +287,20 @@ func TestHTTP2(t *testing.T) {
 	})
 	t.Run("post body", func(t *testing.T) {
 		stack.SetAilurosAnswer(200, 0, nil)
-		e := len(stack.EchoCalls())
+		a, e := len(stack.AilurosCalls()), len(stack.EchoCalls())
 		body := randomBytes(t, 256*1024)
 		resp, err := client.Post(url("/c/h2-post"), "application/octet-stream", bytes.NewReader(body))
 		if err != nil {
 			t.Fatal(err)
 		}
 		resp.Body.Close()
-		ec := stack.EchoCalls()[e:]
+		if resp.ProtoMajor != 2 {
+			t.Errorf("protocol = %s, want HTTP/2", resp.Proto)
+		}
+		ac, ec := stack.AilurosCalls()[a:], stack.EchoCalls()[e:]
+		if len(ac) != 1 || len(ac[0].Body) != 0 {
+			t.Errorf("ailuros calls = %d (first body %d bytes), want 1 with no body", len(ac), len(ac[0].Body))
+		}
 		if resp.StatusCode != 200 || len(ec) != 1 || !bytes.Equal(ec[0].Body, body) {
 			t.Errorf("status = %d, echo calls = %d; want 200 and the full body", resp.StatusCode, len(ec))
 		}
@@ -422,8 +429,18 @@ func TestKeepaliveAndConcurrency(t *testing.T) {
 	}
 	// NGINX closes the connection after a 400 or 413 answer, so not every
 	// request after a connection's first reuses it; 200 and 403 do.
-	if reused < conns {
-		t.Errorf("reused connections = %d, want keepalive in use (at least %d)", reused, conns)
+	// A request reuses its connection iff the previous one on it was
+	// answered 200 or 403 (the kind index is n%4: ok, b, r, w).
+	wantReused := 0
+	for c := 0; c < conns; c++ {
+		for i := 1; i < perConn; i++ {
+			if kinds[(c*perConn+i-1)%len(kinds)].status == 200 || kinds[(c*perConn+i-1)%len(kinds)].status == 403 {
+				wantReused++
+			}
+		}
+	}
+	if reused != wantReused {
+		t.Errorf("reused connections = %d, want %d", reused, wantReused)
 	}
 	if got := len(stack.AilurosCalls()) - before; got != conns*perConn {
 		t.Errorf("ailuros calls = %d, want %d", got, conns*perConn)
@@ -494,30 +511,45 @@ server {
         proxy_pass_request_body off;
         proxy_set_header Content-Length "";
         proxy_connect_timeout 1s;
-        proxy_read_timeout 5s;
+        proxy_read_timeout 10s;
     }
     location /c/ { proxy_pass http://echo:8080; }
 }
 `
 
+// TestReloadMidCheck: ten requests are mid-check (Ailuros answers 500, "no
+// decision", after 4 s) when NGINX reloads from "closed" to "open". The
+// outcome depends on the policy, so it shows which configuration decided:
+// the in-flight requests get the old one's 503, a request after the reload
+// the new one's pass-through with a warning. The test fails if the reload
+// was not observed (in the error log) before any in-flight response arrived.
 func TestReloadMidCheck(t *testing.T) {
 	stack := harness.Up(t, harness.Config{NGINXConf: fmt.Sprintf(reloadConfTemplate, "closed")})
-	stack.SetAilurosAnswer(403, 2*time.Second, nil)
+	const delay = 4 * time.Second
+	stack.SetAilurosAnswer(500, delay, nil)
 
 	const n = 10
 	a0, e0 := len(stack.AilurosCalls()), len(stack.EchoCalls())
-	statuses := make([]int, n)
+	type result struct {
+		status int
+		err    error
+		done   time.Time
+	}
+	results := make([]result, n)
 	var wg sync.WaitGroup
+	start := time.Now()
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			resp, err := stack.Client().Get(fmt.Sprintf("%s/c/inflight/%d", stack.Base(), i))
+			results[i].done = time.Now()
 			if err != nil {
+				results[i].err = err
 				return
 			}
 			resp.Body.Close()
-			statuses[i] = resp.StatusCode
+			results[i].status = resp.StatusCode
 		}()
 	}
 	deadline := time.Now().Add(10 * time.Second)
@@ -528,31 +560,54 @@ func TestReloadMidCheck(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	// All ten are mid-check. Reload with a config that fails open.
+	logBefore := stack.ErrorLog()
 	stack.Reload(t, fmt.Sprintf(reloadConfTemplate, "open"))
-	wg.Wait()
-	for i, s := range statuses {
-		if s != 403 {
-			t.Errorf("in-flight request %d: status = %d, want its decision (403)", i, s)
+	// The reload is observable: the old worker is told to shut down
+	// gracefully while it still has requests to finish.
+	var reloadLog string
+	for deadline = time.Now().Add(delay / 2); ; time.Sleep(50 * time.Millisecond) {
+		reloadLog = strings.TrimPrefix(stack.ErrorLog(), logBefore)
+		if hasLine(reloadLog, "gracefully shutting down") || time.Now().After(deadline) {
+			break
 		}
 	}
+	reloadSeen := time.Now()
+	if !hasLine(reloadLog, "gracefully shutting down") {
+		t.Fatalf("reload not observed in the error log within %v:\n%s", delay/2, reloadLog)
+	}
+	wg.Wait()
+	for i, r := range results {
+		if r.done.Before(reloadSeen) {
+			t.Errorf("in-flight request %d finished %v before the reload was seen: not mid-check", i, reloadSeen.Sub(r.done))
+		}
+		if r.err != nil {
+			t.Errorf("in-flight request %d: %v", i, r.err)
+		} else if r.status != 503 {
+			t.Errorf("in-flight request %d: status = %d, want 503 (old config, closed)", i, r.status)
+		}
+	}
+	if d := time.Since(start); d < delay-500*time.Millisecond {
+		t.Errorf("in-flight requests took %v, want about the %v Ailuros delay", d, delay)
+	}
 	if got := len(stack.EchoCalls()) - e0; got != 0 {
-		t.Errorf("echo calls = %d, want 0 (all ten were blocked)", got)
+		t.Errorf("echo calls = %d, want 0 (closed config refused all ten)", got)
 	}
 
-	// The new configuration: Ailuros unreachable now means continue.
-	stack.StopAiluros()
-	deadline = time.Now().Add(10 * time.Second)
+	// The new configuration: no decision now means continue, with a warning.
+	stack.SetAilurosAnswer(500, 0, nil)
+	logBefore = stack.ErrorLog()
 	var last int
-	for {
+	for deadline = time.Now().Add(10 * time.Second); ; time.Sleep(200 * time.Millisecond) {
 		last = stack.Get(t, "/c/after-reload").StatusCode
 		if last == 200 || time.Now().After(deadline) {
 			break
 		}
-		time.Sleep(200 * time.Millisecond)
 	}
 	if last != 200 {
-		t.Errorf("request after reload with ailuros down: status = %d, want 200 (open)", last)
+		t.Errorf("request after reload: status = %d, want 200 (open)", last)
+	}
+	if log := waitLog(stack, logBefore, true); !hasLine(log, "[warn]", "ailuros_request") {
+		t.Errorf("no fail-open warning after the reload; new log:\n%s", log)
 	}
 	log := stack.ErrorLog()
 	for _, bad := range []string{"[alert]", "[crit]", "[emerg]", "exited on signal"} {

@@ -5,7 +5,7 @@
 //	GET  /calls   the requests received so far, as JSON
 //	POST /answer  {"status": 403, "delay_ms": 0, "headers": {...},
 //	              "routes": {"/block/": 403}} (ailuros; a route overrides the
-//	              status for requests whose X-Original-URI starts with its key)
+//	              status for requests whose X-Original-URI starts with its key; the longest key wins)
 //	POST /stop    stop listening on -listen, so connections are refused
 //
 // Roles:
@@ -73,9 +73,10 @@ func main() {
 			a := s.answer
 			s.mu.Unlock()
 			orig := r.Header.Get("X-Original-URI")
+			best := -1 // the longest matching prefix wins
 			for prefix, status := range a.Routes {
-				if strings.HasPrefix(orig, prefix) {
-					a.Status = status
+				if strings.HasPrefix(orig, prefix) && len(prefix) > best {
+					best, a.Status = len(prefix), status
 				}
 			}
 			if a.DelayMS > 0 {

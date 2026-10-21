@@ -211,8 +211,8 @@ func CheckConfig(t *testing.T, conf string) (ok bool, output string) {
 	return err == nil, out
 }
 
-// SetAilurosRoutes makes the Ailuros stub answer with the status of the first
-// route whose key is a prefix of the request's X-Original-URI, instead of the
+// SetAilurosRoutes makes the Ailuros stub answer with the status of the
+// route with the longest key that is a prefix of the request's X-Original-URI, instead of the
 // default answer's status.
 func (s *Stack) SetAilurosRoutes(status int, routes map[string]int) {
 	body, _ := json.Marshal(map[string]any{"status": status, "routes": routes})

@@ -41,8 +41,11 @@ typedef struct {
 static ngx_int_t ngx_http_ailuros_handler(ngx_http_request_t *r);
 static ngx_int_t ngx_http_ailuros_done(ngx_http_request_t *r, void *data,
     ngx_int_t rc);
+static ngx_uint_t ngx_http_ailuros_internal(ngx_http_request_t *r,
+    ngx_http_ailuros_loc_conf_t *alcf, ngx_http_ailuros_ctx_t *ctx);
 static ngx_int_t ngx_http_ailuros_apply(ngx_http_request_t *r,
-    ngx_http_ailuros_loc_conf_t *alcf, ngx_uint_t status);
+    ngx_http_ailuros_loc_conf_t *alcf, ngx_uint_t status,
+    ngx_uint_t internal);
 static ngx_int_t ngx_http_ailuros_store_status(ngx_http_request_t *r,
     ngx_uint_t status);
 static ngx_int_t ngx_http_ailuros_set_variables(ngx_http_request_t *r,
@@ -188,7 +191,8 @@ ngx_http_ailuros_handler(ngx_http_request_t *r)
             return NGX_ERROR;
         }
 
-        return ngx_http_ailuros_apply(r, alcf, ctx->status);
+        return ngx_http_ailuros_apply(r, alcf, ctx->status,
+                                      ngx_http_ailuros_internal(r, alcf, ctx));
     }
 
     ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_ailuros_ctx_t));
@@ -263,6 +267,37 @@ ngx_http_ailuros_done(ngx_http_request_t *r, void *data, ngx_int_t rc)
 
 
 /*
+ * Whether the location that answered the subrequest (the last one it was in,
+ * after any internal redirect) can only be reached internally: an
+ * "internal" location, or a named one.  Anything else -- a catch-all
+ * "location /" answering a URI with no location of its own, or a location
+ * clients can also request -- is not Ailuros answering, so its status is
+ * not a decision.
+ */
+
+static ngx_uint_t
+ngx_http_ailuros_internal(ngx_http_request_t *r,
+    ngx_http_ailuros_loc_conf_t *alcf, ngx_http_ailuros_ctx_t *ctx)
+{
+    const ngx_http_core_loc_conf_t  *clcf;
+
+    clcf = ngx_http_get_module_loc_conf(ctx->subrequest, ngx_http_core_module);
+
+    if (clcf->internal == 1 || clcf->named) {
+        return 1;
+    }
+
+    ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                  "ailuros_request \"%V\" was answered (status %ui) by a "
+                  "location that is not internal; the location must be "
+                  "\"internal\", treating the answer as no decision",
+                  &alcf->uri, ctx->status);
+
+    return 0;
+}
+
+
+/*
  * Maps the subrequest's status to what the request gets:
  *
  *   2xx                continues
@@ -273,13 +308,18 @@ ngx_http_ailuros_done(ngx_http_request_t *r, void *data, ngx_int_t rc)
  *
  * "Anything else" includes 0 (no status), 1xx, 3xx, other 4xx (such as the
  * 404 of a missing internal location) and other 5xx (such as the proxy's
- * 502 and 504 when Ailuros is unreachable or times out).
+ * 502 and 504 when Ailuros is unreachable or times out).  Any status from
+ * a location that is not internal is no decision too.
  */
 
 static ngx_int_t
 ngx_http_ailuros_apply(ngx_http_request_t *r,
-    ngx_http_ailuros_loc_conf_t *alcf, ngx_uint_t status)
+    ngx_http_ailuros_loc_conf_t *alcf, ngx_uint_t status, ngx_uint_t internal)
 {
+    if (!internal) {
+        goto no_decision;
+    }
+
     if (status >= NGX_HTTP_OK && status < NGX_HTTP_SPECIAL_RESPONSE) {
         return NGX_DECLINED;
     }
@@ -295,6 +335,8 @@ ngx_http_ailuros_apply(ngx_http_request_t *r,
     default:
         break;
     }
+
+no_decision:
 
     if (alcf->open) {
         ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,

@@ -13,6 +13,7 @@
 //	ailuros   answers every request with the configured answer (default 200)
 //	tinyauth  answers 200 when the request has "Authorization: ok", else 401
 //	echo      answers 200 with a JSON echo of the request
+//	model     an OpenAI-compatible chat completions stub (model.go)
 package main
 
 import (
@@ -100,6 +101,8 @@ func main() {
 			}
 			w.WriteHeader(http.StatusUnauthorized)
 		}
+	case "model":
+		h = modelHandler(s)
 	case "echo":
 		h = func(w http.ResponseWriter, r *http.Request) {
 			c := s.record(r)

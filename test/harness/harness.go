@@ -51,6 +51,13 @@ type Config struct {
 	NGINXConf string
 	// ModuleImage replaces the stock NGF image (e.g. a sanitizer build).
 	ModuleImage string
+	// RealAiluros, if set, is an Ailuros image reference (pinned by digest)
+	// that replaces the Ailuros stub, together with a stub model service
+	// (model:8000). Ailuros is configured as the contract test needs it:
+	// lite inspection, the OpenAI backend on the stub model, forward-auth on
+	// 9002, ext_proc and ext_authz off. Stack.AilurosCalls and
+	// SetAilurosAnswer are then unavailable; use AilurosLog and StopAiluros.
+	RealAiluros string
 }
 
 // Call is one request a stub received.
@@ -67,8 +74,10 @@ type Stack struct {
 	file    string
 	conf    string // host path of the http-level config NGINX includes
 	base    string // http://127.0.0.1:<port> of NGINX's 8080
+	admin   string // http://127.0.0.1:<port> of the real Ailuros's 9090
 	tlsAddr string // 127.0.0.1:<port> of NGINX's 8443
 	control map[string]string
+	real    bool // the real Ailuros replaces the stub
 	client  *http.Client
 }
 
@@ -88,9 +97,14 @@ func Up(t *testing.T, cfg Config) *Stack {
 	sanitized := image != StockImage(t)
 
 	dir := confDir(t, cfg.NGINXConf)
+	services := fmt.Sprintf(stubServices, stubImage, stubImage, stubImage)
+	dependsOn := "[ailuros, tinyauth, echo]"
+	if cfg.RealAiluros != "" {
+		services = fmt.Sprintf(realServices, cfg.RealAiluros, stubImage, stubImage, stubImage)
+	}
 	compose := fmt.Sprintf(composeTemplate, image, so, ModulePath,
 		filepath.Join(dir, "ailuros.conf"), filepath.Join(dir, "harness.conf"),
-		filepath.Join(dir, "default.conf"), filepath.Join(dir, "tls"), stubImage, stubImage, stubImage)
+		filepath.Join(dir, "default.conf"), filepath.Join(dir, "tls"), dependsOn) + services
 	file := filepath.Join(dir, "compose.yaml")
 	if err := os.WriteFile(file, []byte(compose), 0o644); err != nil {
 		t.Fatalf("write compose file: %v", err)
@@ -101,6 +115,7 @@ func Up(t *testing.T, cfg Config) *Stack {
 		file:    file,
 		conf:    filepath.Join(dir, "default.conf"),
 		control: map[string]string{},
+		real:    cfg.RealAiluros != "",
 		client: &http.Client{
 			Timeout:       20 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -131,7 +146,12 @@ func Up(t *testing.T, cfg Config) *Stack {
 
 	s.base = "http://" + s.port(t, "nginx", "8080")
 	s.tlsAddr = s.port(t, "nginx", "8443")
-	for _, svc := range []string{"ailuros", "tinyauth", "echo"} {
+	svcs := []string{"ailuros", "tinyauth", "echo"}
+	if s.real {
+		svcs = []string{"model", "tinyauth", "echo"}
+		s.admin = "http://" + s.port(t, "ailuros", "9090")
+	}
+	for _, svc := range svcs {
 		s.control[svc] = "http://" + s.port(t, svc, "9999")
 	}
 	s.waitReady(t)
@@ -324,6 +344,12 @@ func (s *Stack) SetAilurosAnswer(status int, delay time.Duration, headers map[st
 // connections to it are refused (the container keeps its address, so this is
 // a refusal rather than an unreachable host). Its calls stay readable.
 func (s *Stack) StopAiluros() {
+	if s.real {
+		if out, err := s.compose("stop", "--timeout", "10", "ailuros"); err != nil {
+			panic(fmt.Sprintf("stop ailuros: %v\n%s", err, out))
+		}
+		return
+	}
 	resp, err := s.client.Post(s.control["ailuros"]+"/stop", "", nil)
 	if err != nil {
 		panic(fmt.Sprintf("stop ailuros: %v", err))
@@ -419,6 +445,21 @@ func (s *Stack) nginxLogs() (string, error) {
 		"logs", "--no-color", "--no-log-prefix", "nginx")
 }
 
+// ModelCalls returns the requests the stub model received (real Ailuros only).
+func (s *Stack) ModelCalls() []Call { return s.calls("model") }
+
+// AilurosLog returns the real Ailuros's stdout/stderr so far, which holds its
+// JSON decision log. It fails the test if the log cannot be read.
+func (s *Stack) AilurosLog(t *testing.T) string {
+	t.Helper()
+	out, err := run(30*time.Second, "docker", "compose", "-p", s.project, "-f", s.file,
+		"logs", "--no-color", "--no-log-prefix", "ailuros")
+	if err != nil {
+		t.Fatalf("read ailuros log: %v\n%s", err, out)
+	}
+	return out
+}
+
 func (s *Stack) logs() string { return s.ErrorLog() }
 
 func (s *Stack) compose(args ...string) (string, error) {
@@ -445,17 +486,25 @@ func (s *Stack) port(t *testing.T, svc, port string) string {
 
 func (s *Stack) waitReady(t *testing.T) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(60 * time.Second)
 	urls := []string{s.base + "/__harness_ready"}
 	for _, c := range s.control {
 		urls = append(urls, c+"/ready")
+	}
+	if s.real {
+		// Ailuros is ready once its startup probe of the model has passed.
+		urls = append(urls, s.admin+"/readyz")
 	}
 	for _, u := range urls {
 		for {
 			resp, err := s.client.Get(u)
 			if err == nil {
+				ok := resp.StatusCode < 300
 				resp.Body.Close()
-				break
+				if ok {
+					break
+				}
+				err = fmt.Errorf("status %d", resp.StatusCode)
 			}
 			if time.Now().After(deadline) {
 				t.Fatalf("stack not ready: %s: %v\n%s", u, err, s.logs())
@@ -613,10 +662,45 @@ const composeTemplate = `services:
     ports:
       - "127.0.0.1::8080"
       - "127.0.0.1::8443"
-    depends_on: [ailuros, tinyauth, echo]
-  ailuros:
+    depends_on: %s
+`
+
+// The Ailuros stub, tinyauth and echo.
+const stubServices = `  ailuros:
     image: %s
     command: ["-role", "ailuros", "-listen", ":9002"]
+    ports:
+      - "127.0.0.1::9999"
+  tinyauth:
+    image: %s
+    command: ["-role", "tinyauth", "-listen", ":3000"]
+    ports:
+      - "127.0.0.1::9999"
+  echo:
+    image: %s
+    command: ["-role", "echo", "-listen", ":8080"]
+    ports:
+      - "127.0.0.1::9999"
+`
+
+// The real Ailuros (forward-auth :9002, admin :9090) classifying through the
+// stub model (model:8000), then tinyauth and echo stubs.
+const realServices = `  ailuros:
+    image: %s
+    environment:
+      AILUROS_INSPECTION_MODE: lite
+      AILUROS_CLASSIFIER_BACKEND: openai
+      AILUROS_CLASSIFIER_BASE_URL: http://model:8000/v1
+      AILUROS_CLASSIFIER_MODEL: stub
+      AILUROS_FORWARDAUTH_ADDR: ":9002"
+      AILUROS_EXTPROC_ADDR: ""
+      AILUROS_EXTAUTHZ_ADDR: ""
+    ports:
+      - "127.0.0.1::9090"
+    depends_on: [model]
+  model:
+    image: %s
+    command: ["-role", "model", "-listen", ":8000"]
     ports:
       - "127.0.0.1::9999"
   tinyauth:

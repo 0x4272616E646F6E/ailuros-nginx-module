@@ -252,9 +252,14 @@ ngx_http_ailuros_handler(ngx_http_request_t *r)
  * Called from ngx_http_finalize_request() of the subrequest, possibly more
  * than once (an error status is finalized first with the code in rc, then
  * again after the special response has set headers_out.status); the last
- * call wins.  If no status was set (an error before any response), the code
- * being finalized with is used when it is an HTTP status, and otherwise the
- * status stays 0, which ngx_http_ailuros_apply() treats as no decision.
+ * call wins.  If no status was set yet, an HTTP status in rc is used.
+ *
+ * A status of 0 here is rare: error-class results (NGX_ERROR, 408, 444,
+ * 499) never reach ngx_http_ailuros_apply(), because
+ * ngx_http_finalize_request() terminates the main request for them right
+ * after this handler returns, before the preaccess handler can run again.
+ * Should a 0 still arrive, ngx_http_ailuros_apply() treats it as no
+ * decision.
  */
 
 static ngx_int_t
@@ -280,13 +285,21 @@ ngx_http_ailuros_done(ngx_http_request_t *r, void *data, ngx_int_t rc)
 
 
 /*
- * Whether the location the subrequest ended in (after any internal
- * redirect) is an "internal" location that is not named.  This does not
- * prove that the location proxies to Ailuros; it rejects the configurations
- * that would make a status come from somewhere else: a catch-all
- * "location /" answering a URI with no location of its own, a location that
- * clients can also request, and named locations (an auth subrequest has no
- * legitimate way to reach one once error_page is off, e.g. via try_files).
+ * Whether the subrequest was answered by the location it was sent to, and
+ * that location is "internal" and not named.  This does not prove that the
+ * location proxies to Ailuros; it rejects the configurations that would
+ * make a status come from somewhere else:
+ *
+ *   - any internal redirect during the subrequest (rewrite ... last,
+ *     try_files, X-Accel-Redirect from the upstream, post_action): each one
+ *     decrements uri_changes, which ngx_http_subrequest() starts at
+ *     NGX_HTTP_MAX_URI_CHANGES + 1, whatever the configuration;
+ *   - a catch-all "location /" answering a URI with no location of its own,
+ *     or a location that clients can also request (not internal);
+ *   - a named location (error_page is off in the subrequest, so for
+ *     example "try_files ... @name" would be the way in, and it is already
+ *     rejected as a redirect above).
+ *
  * Anything rejected here is no decision.
  */
 
@@ -295,6 +308,16 @@ ngx_http_ailuros_internal(ngx_http_request_t *r,
     ngx_http_ailuros_loc_conf_t *alcf, ngx_http_ailuros_ctx_t *ctx)
 {
     const ngx_http_core_loc_conf_t  *clcf;
+
+    if (ctx->subrequest->uri_changes != NGX_HTTP_MAX_URI_CHANGES + 1) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                      "ailuros_request \"%V\" was redirected internally "
+                      "(status %ui); the ailuros_request location must "
+                      "answer itself: no rewrite, try_files or "
+                      "X-Accel-Redirect, treating the answer as no decision",
+                      &alcf->uri, ctx->status);
+        return 0;
+    }
 
     clcf = ngx_http_get_module_loc_conf(ctx->subrequest, ngx_http_core_module);
 

@@ -44,7 +44,7 @@ All are valid in `http`, `server` and `location`, and each level inherits from t
 
 | Directive | Default | Meaning |
 |---|---|---|
-| `ailuros_request <uri> \| off;` | `off` | Send a subrequest to `<uri>`, an internal location that `proxy_pass`es to Ailuros, before the request continues. |
+| `ailuros_request <uri> \| off;` | `off` | Send a subrequest to `<uri>`, an internal location that `proxy_pass`es to Ailuros, before the request continues. The location must be `internal` and not named, and must answer itself: an internal redirect during the subrequest (`rewrite … last`, `try_files`, `X-Accel-Redirect`) makes the answer no decision. `error_page` is not applied in the subrequest, so the proxy's 502/504 stays a 502/504. |
 | `ailuros_request_set $variable <value>;` | none | After the subrequest, set `$variable` to `<value>` (which may use the subrequest's upstream variables, e.g. `$upstream_http_x_ailuros_request_id`). Like `auth_request_set`. |
 | `ailuros_request_unavailable closed \| open;` | `closed` | What happens when Ailuros gives no decision (below). |
 

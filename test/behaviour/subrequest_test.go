@@ -31,7 +31,10 @@ const protected = `
 //	srvlevel  ailuros_request at server level, switched off in /off/
 //	tryfiles  /_ailuros reaches Ailuros only through a named location
 //	named     server-level error_page 502 504 = @ok (a named 200)
-//	maint     server-level error_page 502 =200 /maint.html (internal)
+//	maint     server-level error_page 502 504 =200 /maint.html (internal)
+//	xaccel    the normal /_ailuros, plus an internal /_ok Ailuros can
+//	          X-Accel-Redirect to
+//	rewrite   /_ailuros rewrites to the internal /_ok
 const subrequestConf = `
 server {
     listen 8080 default_server;
@@ -69,9 +72,27 @@ server {
 server {
     listen 8080;
     server_name maint;
-    error_page 502 =200 /maint.html;
+    error_page 502 504 =200 /maint.html;
     location = /maint.html { internal; return 200; }
 ` + ailurosLocation + protected + `
+}
+
+server {
+    listen 8080;
+    server_name xaccel;
+    location = /_ok { internal; return 200; }
+` + ailurosLocation + protected + `
+}
+
+server {
+    listen 8080;
+    server_name rewrite;
+    location = /_ok { internal; return 200; }
+    location = /_ailuros {
+        internal;
+        rewrite ^ /_ok last;
+    }
+` + protected + `
 }
 `
 
@@ -111,7 +132,7 @@ func runSubCases(t *testing.T, stack *harness.Stack, cases []subCase) {
 				}
 			}
 			newLog := waitLog(stack, logBefore, tc.wantWarn || tc.wantInternalErr)
-			if got := hasLine(newLog, "[error]", "must be", "internal"); got != tc.wantInternalErr {
+			if got := hasLine(newLog, "[error]", "ailuros_request", "must"); got != tc.wantInternalErr {
 				t.Errorf("must-be-internal error logged = %v, want %v; new log:\n%s", got, tc.wantInternalErr, newLog)
 			}
 			if got := hasLine(newLog, "[warn]", "ailuros_request"); got != tc.wantWarn {
@@ -127,8 +148,18 @@ func TestSubrequest(t *testing.T) {
 	stack := harness.Up(t, harness.Config{NGINXConf: subrequestConf})
 	stack.SetAilurosAnswer(200, 0, nil)
 
+	// Ailuros up, answering by an X-Accel-Redirect to an internal 200.
+	stack.SetAilurosAnswer(200, 0, map[string]string{"X-Accel-Redirect": "/_ok"})
+	runSubCases(t, stack, []subCase{
+		{"X-Accel-Redirect/closed", "xaccel", "/closed/x", 503, false, false, true, 1},
+		{"X-Accel-Redirect/open", "xaccel", "/open/x", 200, true, true, true, 1},
+	})
+	stack.SetAilurosAnswer(200, 0, nil)
+
 	// Ailuros up.
 	runSubCases(t, stack, []subCase{
+		{"rewrite last/closed", "rewrite", "/closed/x", 503, false, false, true, 0},
+		{"rewrite last/open", "rewrite", "/open/x", 200, true, true, true, 0},
 		// /_ailuros inherits ailuros_request but is never checked itself
 		{"server level/checked once", "srvlevel", "/app/x", 200, true, false, false, 1},
 		{"server level/off in location", "srvlevel", "/off/x", 200, true, false, false, 0},
@@ -160,10 +191,11 @@ server {
 }
 `
 
-// TestFailedReload reloads with a config that fails after the http block
-// has started (so the module's preconfiguration ran for it), kills the
-// worker so the master forks a new one from the old cycle, and checks that
-// the new worker still applies answers and sets $ailuros_request_status.
+// TestFailedReload pins the failed-reload and worker-respawn path: it
+// reloads with a config that fails after the http block has started (so
+// the module's preconfiguration ran for it), kills the worker so the master
+// forks a new one from the old cycle, and checks that the new worker still
+// applies answers and sets $ailuros_request_status.
 func TestFailedReload(t *testing.T) {
 	stack := harness.Up(t, harness.Config{NGINXConf: reloadConf})
 
@@ -188,7 +220,9 @@ func TestFailedReload(t *testing.T) {
 	check(t, 200)
 	check(t, 403)
 
-	// Extra variables before ours would shift indexes in the failed cycle.
+	// Variables the old config does not have. They do not move our index
+	// (it is taken in preconfiguration, before they are parsed), so this
+	// does not reproduce a stale index; it exercises the path.
 	failing := `
 map $host $a1 { default 1; }
 map $host $a2 { default 2; }

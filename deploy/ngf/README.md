@@ -24,6 +24,10 @@ NGINX image; no custom image is run.
    architecture), as a remote kustomize resource or committed next to these
    files. To make one from a local build:
    `scripts/configmap.sh out/ngx_http_ailuros_module-<version>-ngf2.8.0-linux-<arch>.so 2.8.0 <arch> <namespace> | kubectl apply -f -`.
+   Apply it with `kubectl apply --server-side`: client-side apply stores the object in the
+   `last-applied-configuration` annotation (256 KiB cap) and the manifest is close to that. Flux
+   applies server-side. Flux remote file resources are unverified; committing the release's YAML
+   is the fallback.
    The ConfigMap is named `ailuros-nginx-module-ngf2.8.0`; the name carries the
    NGF version, so an NGF bump changes the pod template and rolls the pods.
 3. **NGF**, with `helm-values-patch.yaml` merged into your values.

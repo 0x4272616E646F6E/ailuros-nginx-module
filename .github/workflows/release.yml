@@ -47,17 +47,19 @@ jobs:
         run: scripts/changelog-section.sh "$TAG" >/dev/null
 
   # The full suite and the NGF-in-kind test, as the same reusable workflows.
+  # A job-level ./ call already runs the caller's commit. zizmor prefers
+  # GitHub's $/ form, which actionlint (1.7.12) does not accept yet.
   ci:
     needs: on-main
     permissions:
       contents: read
-    uses: ./.github/workflows/ci.yml
+    uses: ./.github/workflows/ci.yml # zizmor: ignore[self-repository]
 
   kind:
     needs: on-main
     permissions:
       contents: read
-    uses: ./.github/workflows/kind.yml
+    uses: ./.github/workflows/kind.yml # zizmor: ignore[self-repository]
 
   versions:
     needs: on-main

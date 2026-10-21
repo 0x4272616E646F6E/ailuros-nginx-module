@@ -41,6 +41,16 @@ const char *__ubsan_default_options(void)
 {
     return "halt_on_error=1:print_stacktrace=1:suppressions=/etc/nginx/ubsan.supp";
 }
+
+/* A worker's connection and event arrays are allocated once by NGINX core in
+ * ngx_event_process_init and never freed; the worker destroys the cycle pool
+ * that points to them and exits. LeakSanitizer then reports them as indirect
+ * leaks, depending on what is left on the stack (seen on amd64 runners). Only
+ * allocations made under that function are suppressed. */
+const char *__lsan_default_suppressions(void)
+{
+    return "leak:ngx_event_process_init\n";
+}
 SRC
 WORKDIR /src
 # Modules: everything the behaviour configs use (http_v2, ssl, auth_request;

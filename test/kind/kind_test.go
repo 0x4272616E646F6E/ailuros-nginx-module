@@ -116,7 +116,10 @@ func TestNGF(t *testing.T) {
 		t.Logf("kind delete cluster: err=%v\n%s", err, strings.TrimSpace(out))
 	})
 	// A cluster of this name left by an earlier run is ours: replace it.
-	_, _ = e.cmd(t, 5*time.Minute, "", "kind", "delete", "cluster", "--name", cluster, "--kubeconfig", e.kubeconfig)
+	if existing, _ := e.cmd(t, time.Minute, "", "kind", "get", "clusters"); strings.Contains(existing, cluster) {
+		t.Logf("deleting a pre-existing kind cluster named %s", cluster)
+		_, _ = e.cmd(t, 5*time.Minute, "", "kind", "delete", "cluster", "--name", cluster, "--kubeconfig", e.kubeconfig)
+	}
 
 	if out, err := e.cmd(t, 10*time.Minute, "", "kind", "create", "cluster", "--name", cluster,
 		"--kubeconfig", e.kubeconfig, "--wait", "180s"); err != nil {
@@ -160,7 +163,7 @@ func TestNGF(t *testing.T) {
 
 	// Workloads: the real Ailuros on the stub model, tinyauth and echo stubs.
 	e.kubectlIn(t, workloads(e.stubImage), "apply", "-f", "-")
-	for _, d := range []string{"model", "ailuros", "tinyauth", "echo"} {
+	for _, d := range []string{"model", "ailuros", "tinyauth", "echo", "spoof"} {
 		e.kubectl(t, "rollout", "status", "deploy/"+d, "--timeout=180s")
 	}
 
@@ -185,7 +188,7 @@ func TestNGF(t *testing.T) {
 	base := e.portForward(t, "svc/gateway-nginx", "80")
 	client := &http.Client{Timeout: 15 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	do := func(path string, headers map[string]string) (*http.Response, string) {
+	do := func(t *testing.T, path string, headers map[string]string) (*http.Response, string) {
 		t.Helper()
 		req, _ := http.NewRequest(http.MethodGet, base+path, nil)
 		for k, v := range headers {
@@ -202,7 +205,7 @@ func TestNGF(t *testing.T) {
 
 	// Wait until NGF has programmed every route.
 	waitFor(t, 3*time.Minute, func() error {
-		for path, want := range map[string]int{"/plain/ready": 200, "/checked/ready": 200, "/open/ready": 200, "/stacked/ready": 302} {
+		for path, want := range map[string]int{"/plain/ready": 200, "/checked/ready": 200, "/open/ready": 200, "/stacked/ready": 302, "/spoof/ready": 200} {
 			req, _ := http.NewRequest(http.MethodGet, base+path, nil)
 			resp, err := client.Do(req)
 			if err != nil {
@@ -217,14 +220,26 @@ func TestNGF(t *testing.T) {
 	})
 
 	reqID := regexp.MustCompile(`^[0-9a-f]{16}$`)
-	echoHas := func(svc, needle string) bool { return strings.Contains(e.calls(t, svc), needle) }
-	decisions := func() int {
+	echoHas := func(t *testing.T, svc, needle string) bool { return strings.Contains(e.calls(t, svc), needle) }
+	decisions := func(t *testing.T) int {
 		return strings.Count(e.kubectl(t, "logs", "deploy/ailuros"), `"msg":"decision"`)
 	}
 
 	t.Run("plain route never calls Ailuros", func(t *testing.T) {
-		d0, m0 := decisions(), e.callCount(t, "model")
-		resp, _ := do("/plain/hello?q=attack", nil)
+		// Positive control: a checked request does reach Ailuros and is logged,
+		// so the zero below cannot be a log we fail to read.
+		c0 := decisions(t)
+		if r, _ := do(t, "/checked/control", nil); r.StatusCode != 200 {
+			t.Fatalf("control request: status %d, want 200", r.StatusCode)
+		}
+		waitFor(t, 15*time.Second, func() error {
+			if decisions(t) <= c0 {
+				return fmt.Errorf("no new Ailuros decision after a checked request")
+			}
+			return nil
+		})
+		d0, m0 := decisions(t), e.callCount(t, "model")
+		resp, _ := do(t, "/plain/hello?q=attack", nil)
 		if resp.StatusCode != 200 {
 			t.Fatalf("status %d, want 200 (an attack query on an unfiltered route)", resp.StatusCode)
 		}
@@ -232,33 +247,41 @@ func TestNGF(t *testing.T) {
 			t.Errorf("X-Ailuros-Request-Id = %q on a route without the filter", id)
 		}
 		time.Sleep(time.Second) // Ailuros logs its decision after answering
-		if d := decisions(); d != d0 {
+		if d := decisions(t); d != d0 {
 			t.Errorf("Ailuros logged %d new decisions", d-d0)
 		}
 		if m := e.callCount(t, "model"); m != m0 {
 			t.Errorf("the model got %d new calls", m-m0)
 		}
-		if !echoHas("echo", "/plain/hello?q=attack") {
+		if !echoHas(t, "echo", "/plain/hello?q=attack") {
 			t.Errorf("echo did not receive the request")
+		}
+		// An upstream that sets the header itself must not reach the client.
+		spoof, _ := do(t, "/spoof/hello", nil)
+		if spoof.StatusCode != 200 {
+			t.Fatalf("/spoof/hello: status %d, want 200", spoof.StatusCode)
+		}
+		if v := spoof.Header.Values("X-Ailuros-Request-Id"); len(v) != 0 {
+			t.Errorf("upstream-set X-Ailuros-Request-Id leaked to the client: %q", v)
 		}
 	})
 
 	t.Run("checked route allows and blocks", func(t *testing.T) {
-		resp, _ := do("/checked/hello", nil)
+		resp, _ := do(t, "/checked/hello", nil)
 		if resp.StatusCode != 200 {
 			t.Fatalf("/checked/hello: status %d, want 200", resp.StatusCode)
 		}
 		if id := resp.Header.Get("X-Ailuros-Request-Id"); !reqID.MatchString(id) {
 			t.Errorf("X-Ailuros-Request-Id = %q, want 16 hex characters", id)
 		}
-		blocked, _ := do("/checked/blockedpath?q=attack", nil)
+		blocked, _ := do(t, "/checked/blockedpath?q=attack", nil)
 		if blocked.StatusCode != 403 {
 			t.Fatalf("?q=attack: status %d, want 403", blocked.StatusCode)
 		}
 		if id := blocked.Header.Get("X-Ailuros-Request-Id"); !reqID.MatchString(id) {
 			t.Errorf("blocked X-Ailuros-Request-Id = %q, want 16 hex characters", id)
 		}
-		if echoHas("echo", "/checked/blockedpath") {
+		if echoHas(t, "echo", "/checked/blockedpath") {
 			t.Errorf("a blocked request reached the upstream")
 		}
 		t.Logf("allow -> 200, block -> 403 (request id %s)", blocked.Header.Get("X-Ailuros-Request-Id"))
@@ -266,23 +289,29 @@ func TestNGF(t *testing.T) {
 
 	t.Run("stacked route: Ailuros before tinyauth", func(t *testing.T) {
 		t0 := e.callCount(t, "tinyauth")
-		blocked, _ := do("/stacked/blocked?q=attack", nil)
+		blocked, _ := do(t, "/stacked/blocked?q=attack", nil)
 		if blocked.StatusCode != 403 {
 			t.Fatalf("attack: status %d, want 403", blocked.StatusCode)
 		}
 		if n := e.callCount(t, "tinyauth"); n != t0 {
 			t.Errorf("tinyauth was called %d times for a blocked request", n-t0)
 		}
-		login, _ := do("/stacked/hello", nil)
+		login, _ := do(t, "/stacked/hello", nil)
 		if login.StatusCode != 302 || !strings.Contains(login.Header.Get("Location"), "login.example.test") {
 			t.Fatalf("allowed request without credentials: status %d, Location %q, want a 302 to login", login.StatusCode, login.Header.Get("Location"))
 		}
 		if n := e.callCount(t, "tinyauth"); n != t0+1 {
 			t.Errorf("tinyauth calls = %d, want %d", n-t0, 1)
 		}
-		ok, _ := do("/stacked/hello", map[string]string{"Authorization": "ok"})
+		if id := login.Header.Get("X-Ailuros-Request-Id"); !reqID.MatchString(id) {
+			t.Errorf("302 X-Ailuros-Request-Id = %q, want 16 hex characters", id)
+		}
+		ok, _ := do(t, "/stacked/hello", map[string]string{"Authorization": "ok"})
 		if ok.StatusCode != 200 {
 			t.Errorf("with credentials: status %d, want 200", ok.StatusCode)
+		}
+		if id := ok.Header.Get("X-Ailuros-Request-Id"); !reqID.MatchString(id) {
+			t.Errorf("200 X-Ailuros-Request-Id = %q, want 16 hex characters", id)
 		}
 	})
 
@@ -291,24 +320,39 @@ func TestNGF(t *testing.T) {
 		e.kubectl(t, "wait", "--for=delete", "pod", "-l", "app=ailuros", "--timeout=120s")
 		before, _ := e.kubectlTry(t, "logs", "deploy/gateway-nginx", "-c", "nginx")
 
-		closed, _ := do("/checked/hello", nil)
+		closed, _ := do(t, "/checked/down-closed", nil)
 		if closed.StatusCode != 503 {
 			t.Errorf("checked, Ailuros down: status %d, want 503", closed.StatusCode)
 		}
-		open, _ := do("/open/hello", nil)
+		open, _ := do(t, "/open/down-open", nil)
 		if open.StatusCode != 200 {
 			t.Errorf("open, Ailuros down: status %d, want 200", open.StatusCode)
 		}
+		if echoHas(t, "echo", "/checked/down-closed") {
+			t.Errorf("a fail-closed request reached the upstream")
+		}
+		if !echoHas(t, "echo", "/open/down-open") {
+			t.Errorf("the fail-open request did not reach the upstream")
+		}
 		after, _ := e.kubectlTry(t, "logs", "deploy/gateway-nginx", "-c", "nginx")
-		var warned bool
+		var rejected, warned bool
 		for _, line := range strings.Split(strings.TrimPrefix(after, before), "\n") {
-			if strings.Contains(line, "[warn]") && strings.Contains(line, "ailuros_request") {
+			if strings.Contains(line, "[error]") && strings.Contains(line, "request: \"GET /checked/down-closed") &&
+				strings.Contains(line, "rejecting the request with 503") && strings.Contains(line, "ailuros_request_unavailable closed") {
+				rejected = true
+				t.Logf("error: %s", line)
+			}
+			if strings.Contains(line, "[warn]") && strings.Contains(line, "request: \"GET /open/down-open") &&
+				strings.Contains(line, "letting the request through") && strings.Contains(line, "ailuros_request_unavailable open") {
 				warned = true
 				t.Logf("warning: %s", line)
 			}
 		}
+		if !rejected {
+			t.Errorf("no fail-closed [error] line for /checked/down-closed in the nginx log")
+		}
 		if !warned {
-			t.Errorf("no fail-open [warn] line in the nginx log")
+			t.Errorf("no fail-open [warn] line for /open/down-open in the nginx log")
 		}
 	})
 }
@@ -388,7 +432,12 @@ func (e *env) diagnostics(t *testing.T) {
 }
 
 func workloads(stub string) string {
-	stubDeploy := func(name, role, listen string) string {
+	stubDeploy := func(name, role, listen string, extra ...string) string {
+		args := `["-role", "` + role + `", "-listen", ":` + listen + `"`
+		for _, x := range extra {
+			args += `, "` + x + `"`
+		}
+		args += "]"
 		return fmt.Sprintf(`apiVersion: apps/v1
 kind: Deployment
 metadata: {name: %[1]s}
@@ -402,7 +451,7 @@ spec:
         - name: stub
           image: %[2]s
           imagePullPolicy: IfNotPresent
-          args: ["-role", "%[3]s", "-listen", ":%[4]s"]
+          args: %[3]s
           ports: [{containerPort: %[4]s}, {containerPort: 9999}]
           readinessProbe: {httpGet: {path: /ready, port: 9999}}
 ---
@@ -415,11 +464,12 @@ spec:
     - {name: http, port: %[5]s, targetPort: %[4]s}
     - {name: ctl, port: 9999, targetPort: 9999}
 ---
-`, name, stub, role, listen, map[string]string{"model": "8000", "tinyauth": "3000", "echo": "80"}[name])
+`, name, stub, args, listen, map[string]string{"model": "8000", "tinyauth": "3000", "echo": "80", "spoof": "80"}[name])
 	}
 	return stubDeploy("model", "model", "8000") +
 		stubDeploy("tinyauth", "tinyauth", "3000") +
-		stubDeploy("echo", "echo", "8080") + `apiVersion: apps/v1
+		stubDeploy("echo", "echo", "8080") +
+		stubDeploy("spoof", "echo", "8080", "-resp-header", "X-Ailuros-Request-Id: spoofed0123456789") + `apiVersion: apps/v1
 kind: Deployment
 metadata: {name: ailuros}
 spec:
@@ -479,10 +529,10 @@ spec:
       value: |
         auth_request /_tinyauth;
         error_page 401 =302 http://login.example.test/login;
-` + routes("plain", nil) + routes("checked", []string{"ailuros-check"}) +
-	routes("stacked", []string{"ailuros-check", "tinyauth"}) + routes("open", []string{"ailuros-check-open"})
+` + routes("plain", "echo", nil) + routes("spoof", "spoof", nil) + routes("checked", "echo", []string{"ailuros-check"}) +
+	routes("stacked", "echo", []string{"ailuros-check", "tinyauth"}) + routes("open", "echo", []string{"ailuros-check-open"})
 
-func routes(name string, filters []string) string {
+func routes(name, backend string, filters []string) string {
 	var f string
 	for _, n := range filters {
 		f += fmt.Sprintf("        - type: ExtensionRef\n          extensionRef: {group: gateway.nginx.org, kind: SnippetsFilter, name: %s}\n", n)
@@ -498,6 +548,6 @@ spec:
   parentRefs: [{name: gateway}]
   rules:
     - matches: [{path: {type: PathPrefix, value: /%[1]s}}]
-%[2]s      backendRefs: [{name: echo, port: 80}]
-`, name, f)
+%[2]s      backendRefs: [{name: %[3]s, port: 80}]
+`, name, f, backend)
 }

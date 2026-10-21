@@ -61,6 +61,7 @@ func main() {
 	role := flag.String("role", "", "ailuros, tinyauth or echo")
 	listen := flag.String("listen", ":8080", "address for the role's traffic")
 	control := flag.String("control", ":9999", "address for the control API")
+	respHeader := flag.String("resp-header", "", "echo role: a \"Name: value\" header to add to every response")
 	flag.Parse()
 
 	s := &state{answer: answer{Status: http.StatusOK}}
@@ -106,6 +107,9 @@ func main() {
 	case "echo":
 		h = func(w http.ResponseWriter, r *http.Request) {
 			c := s.record(r)
+			if k, v, ok := strings.Cut(*respHeader, ":"); ok {
+				w.Header().Set(strings.TrimSpace(k), strings.TrimSpace(v))
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(c)
 		}

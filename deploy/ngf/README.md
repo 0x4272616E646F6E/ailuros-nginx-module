@@ -15,6 +15,9 @@ NGINX image; no custom image is run.
 
 1. **Gateway API CRDs and Ailuros.** Install the Gateway API CRDs NGF 2.8.0
    documents, and run Ailuros with forward-auth on port 9002 behind a Service.
+   The Service must exist before you apply the policy: `proxy_pass` has a
+   literal host, which NGINX resolves when it loads the configuration, so
+   without the Service `nginx -t` fails and NGF rejects the Gateway's config.
 2. **The module ConfigMap**, in the namespace where NGF runs the NGINX pods (the
    Gateway's namespace), before the pods start. Use the release asset
    `ailuros-nginx-module-ngf2.8.0-<arch>.yaml` (match the cluster's CPU
@@ -69,6 +72,14 @@ Routes without a filter are never sent to Ailuros and carry no
 - **`add_header X-Ailuros-Request-Id` is at server level, once.** A
   location-level `add_header` would drop the server-level headers of every
   route.
+
+- **Upstream cannot spoof the header.** The policy has a server-level
+  `proxy_hide_header X-Ailuros-Request-Id;`, so an upstream app that sends the
+  header is not passed on; only the module-set value is. A location-level
+  `proxy_hide_header` or `add_header` (for example from a
+  `ResponseHeaderModifier` on a checked route, which NGF renders as a
+  location-level `add_header`) replaces the server-level ones: the request-id
+  header would be dropped and a spoofed one would no longer be hidden.
 
 ## `ailuros_request` at server level
 

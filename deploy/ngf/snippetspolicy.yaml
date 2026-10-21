@@ -50,4 +50,8 @@ spec:
 
         # At server level, once: a location-level add_header would drop the
         # server-level ones. Empty (so not sent) where Ailuros is not attached.
+        # Drop any X-Ailuros-Request-Id an upstream app sends, so only the
+        # module-set value above reaches clients.
+        proxy_hide_header X-Ailuros-Request-Id;
+
         add_header X-Ailuros-Request-Id $ailuros_request_id always;

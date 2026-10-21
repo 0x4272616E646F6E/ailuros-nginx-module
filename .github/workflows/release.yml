@@ -104,7 +104,11 @@ jobs:
           TAG: ${{ github.ref_name }}
           NGF: ${{ matrix.ngf }}
           ARCH: ${{ matrix.arch }}
-        run: make release-build VERSION="$TAG" NGF="$NGF" RELEASE_ARCHES="$ARCH"
+        run: |
+          # Compile with -Werror and load the .so with nginx -t in the stock
+          # image (same buildx cache as the release build), then build the assets.
+          make verify NGF="$NGF" ARCH="$ARCH"
+          make release-build VERSION="$TAG" NGF="$NGF" RELEASE_ARCHES="$ARCH"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist-ngf${{ matrix.ngf }}-${{ matrix.arch }}

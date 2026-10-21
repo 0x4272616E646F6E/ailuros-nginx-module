@@ -146,7 +146,7 @@ Go tests driving Docker, as in Ailuros:
    - GET, HEAD and POST: the body never reaches Ailuros and reaches the upstream intact; Ailuros sees the original method and URI; large headers, keepalive and concurrency; a client hanging up mid-check.
 3. **Sanitizers.** The same suite against the same NGINX version built on Debian with AddressSanitizer and UBSan (they do not work on the NGF image's Alpine).
 4. **Real Ailuros and NGF.**
-   - Contract test: the published Ailuros image, pinned, with a minimal OpenAI-compatible stub model. It confirms the `X-Original-*` headers are read, allow and block, the request ID, and the `X-Forwarded-*` blanking.
+   - Contract test: the published Ailuros image, pinned, with a minimal OpenAI-compatible stub model. It confirms the `X-Original-*` headers are read, allow and block, the request ID, the `X-Forwarded-*` blanking, and that Ailuros logs the client's Host and NGINX's `$remote_addr` even when a client forges `X-Forwarded-Host`, `X-Real-IP` or `X-Forwarded-For`.
    - NGF in kind (weekly, on demand, before each release): real NGF with `nginxGateway.snippets.enable` and the Helm `nginx.patches` JSONPatch mount, the main-context `SnippetsPolicy`, per-route `SnippetsFilter`s, Ailuros and the tinyauth stub; allow, block and stacking end to end. It uses its own temporary kubeconfig.
 
 ## Verification before implementation

@@ -6,6 +6,7 @@ package contract
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"os"
 	"regexp"
@@ -90,6 +91,8 @@ type decision struct {
 	Method    string `json:"method"`
 	Path      string `json:"path"`
 	Frontend  string `json:"frontend"`
+	Host      string `json:"host"`
+	ClientIP  string `json:"client_ip"`
 }
 
 // waitDecision polls Ailuros's log for the decision line of id.
@@ -110,12 +113,20 @@ func waitDecision(t *testing.T, s *harness.Stack, id string) decision {
 	}
 }
 
+// forgedIP is the client IP the forged headers claim (TEST-NET-3).
+const forgedIP = "203.0.113.9"
+
+// appHost is the Host every contract request is sent with; Ailuros must see
+// it, not the /_ailuros proxy_pass host or a client's X-Forwarded-Host.
+const appHost = "app.example"
+
 func get(t *testing.T, s *harness.Stack, path string, headers map[string]string) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	req.Host = appHost
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -127,11 +138,16 @@ func TestRealAilurosContract(t *testing.T) {
 
 	// forged are client headers that would break or fool a proxy that passed
 	// them on: with X-Forwarded-Uri next to X-Original-URI Ailuros answers 500,
-	// and a forged X-Original-URI would have the wrong path classified.
+	// a forged X-Original-URI would have the wrong path classified, a forged
+	// X-Forwarded-Host would pick another route's policy, and a forged
+	// X-Real-IP or X-Forwarded-For would set the client IP.
 	forged := map[string]string{
 		"X-Original-URI":     "/safe",
 		"X-Forwarded-Uri":    "/safe",
 		"X-Forwarded-Method": "GET",
+		"X-Forwarded-Host":   "forged.example",
+		"X-Real-IP":          forgedIP,
+		"X-Forwarded-For":    forgedIP,
 	}
 
 	cases := []struct {
@@ -169,6 +185,12 @@ func TestRealAilurosContract(t *testing.T) {
 				d := waitDecision(t, s, id)
 				if d.Outcome != tc.wantOutcome || d.Method != "GET" || d.Path != tc.wantPath || d.Frontend != "forwardauth" {
 					t.Errorf("decision = %+v, want outcome=%s method=GET path=%s frontend=forwardauth", d, tc.wantOutcome, tc.wantPath)
+				}
+				if d.Host != appHost {
+					t.Errorf("decision host = %q, want %q (the client's Host)", d.Host, appHost)
+				}
+				if ip := net.ParseIP(d.ClientIP); ip == nil || d.ClientIP == forgedIP {
+					t.Errorf("decision client_ip = %q, want NGINX's $remote_addr", d.ClientIP)
 				}
 				t.Logf("status %d, request id %s, decision %+v", resp.StatusCode, id, d)
 			})

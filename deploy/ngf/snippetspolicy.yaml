@@ -38,6 +38,13 @@ spec:
             proxy_set_header X-Original-URI $request_uri;
             proxy_set_header X-Forwarded-Method "";
             proxy_set_header X-Forwarded-Uri "";
+            # The host Ailuros matches routes on and the client IP it uses,
+            # from the real request: a location's own proxy_set_header lines
+            # inherit none from the server, so a client's copies would pass.
+            proxy_set_header X-Forwarded-Host $host;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header X-Forwarded-For $remote_addr;
+            proxy_set_header X-Real-IP $remote_addr;
             proxy_ignore_headers X-Accel-Redirect X-Accel-Expires X-Accel-Limit-Rate X-Accel-Buffering X-Accel-Charset;
             # Ailuros's classifier timeout defaults to 1s; leave 500ms.
             proxy_connect_timeout 1s;

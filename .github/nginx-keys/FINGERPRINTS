@@ -1,0 +1,7 @@
+# Primary-key fingerprints allowed to sign NGINX source tarballs (nginx.org/en/pgp_keys.html,
+# fetched 2026-10-21). scripts/verify-nginx-source.sh imports the *.key files next to this
+# file, requires their fingerprints to be exactly this set, and accepts a signature only
+# from one of them. Adding a key means a reviewed change to this file.
+43387825DDB1BB97EC36BA5D007C8D7C15D87369  Roman Arutyunyan
+D6786CE303D9A9022998DC6CC8464D549AF75C0A  Sergey Kandaurov
+13C82A63B603576156E30A4EA0EA981B66B0D967  Konstantin Pavlov

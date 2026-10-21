@@ -20,7 +20,7 @@ BUILD_ARGS_ASAN = --build-arg NGINX_VERSION=$(NGINX_VERSION) --build-arg NGINX_S
 build-host: check-ngf
 	scripts/build-host.sh $(NGF)
 
-.PHONY: build-host build verify test test-asan test-contract test-kind cppcheck check-ngf clean
+.PHONY: release-assets release-clean build-host build verify test test-asan test-contract test-kind cppcheck check-ngf clean
 
 check-ngf:
 	@command -v jq >/dev/null || { echo "jq is required but not installed" >&2; exit 1; }
@@ -86,6 +86,37 @@ cppcheck:
 			ghcr.io/nginx/nginx-gateway-fabric/nginx:$(CPPCHECK_NGF) \
 			-c 'apk add --no-cache cppcheck >/dev/null && cppcheck --version && cppcheck $(CPPCHECK_FLAGS) /src'; \
 	fi
+
+# Every versions.json row x {amd64, arm64}: the .so, its ConfigMap YAML and
+# dist/SHA256SUMS, with the release's names. VERSION must be set, e.g.
+#   make release-assets VERSION=v0.1.0
+# NGF=<ngf> and RELEASE_ARCHES="<arch>..." narrow the build to one row or
+# architecture (the release workflow builds each natively, then runs
+# release-checksums once over the merged dist/). A foreign architecture builds
+# under QEMU emulation.
+RELEASE_ARCHES = amd64 arm64
+.PHONY: release-build release-checksums
+release-assets: release-clean release-build release-checksums
+
+release-clean:
+	rm -rf dist
+
+release-build:
+	@test "$(VERSION)" != dev || { echo "VERSION is required, e.g. make release-assets VERSION=v0.1.0" >&2; exit 1; }
+	@command -v jq >/dev/null || { echo "jq is required but not installed" >&2; exit 1; }
+	mkdir -p dist out
+	set -e; for ngf in $$(jq -r --arg ngf '$(NGF)' '.[] | select($$ngf == "" or .ngf == $$ngf) | .ngf' versions.json); do \
+		for arch in $(RELEASE_ARCHES); do \
+			$(MAKE) --no-print-directory build NGF=$$ngf ARCH=$$arch VERSION=$(VERSION); \
+			so=ngx_http_ailuros_module-$(VERSION)-ngf$$ngf-linux-$$arch.so; \
+			cp out/$$so dist/$$so; \
+			AILUROS_VERSION=$(VERSION) scripts/configmap.sh dist/$$so $$ngf $$arch > dist/ailuros-nginx-module-ngf$$ngf-$$arch.yaml; \
+		done; \
+	done
+
+release-checksums:
+	cd dist && if command -v sha256sum >/dev/null; then sha256sum *.so *.yaml; else shasum -a 256 *.so *.yaml; fi > SHA256SUMS
+	@echo "wrote dist/:" && ls dist
 
 clean:
 	rm -rf out dist

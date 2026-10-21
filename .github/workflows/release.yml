@@ -1,0 +1,161 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+# Called workflows (ci.yml, kind.yml) use "ci-" and "kind-" prefixed groups
+# built from the caller's name, so this group must not collide with them (and
+# differs from them by more than case). A release is never cancelled midway.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # The tag must look like a release and its commit must be on main.
+  on-main:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Tag is a release version and its commit is on main
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::tag $TAG is not vMAJOR.MINOR.PATCH[-prerelease]"
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+            echo "::error::$TAG ($GITHUB_SHA) is not on main"
+            exit 1
+          fi
+      - name: CHANGELOG has a section for the tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: scripts/changelog-section.sh "$TAG" >/dev/null
+
+  # The full suite and the NGF-in-kind test, as the same reusable workflows.
+  ci:
+    needs: on-main
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
+  kind:
+    needs: on-main
+    permissions:
+      contents: read
+    uses: ./.github/workflows/kind.yml
+
+  versions:
+    needs: on-main
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      ngf: ${{ steps.read.outputs.ngf }}
+    steps:
+      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: read
+        run: echo "ngf=$(jq -c '[.[].ngf]' versions.json)" >> "$GITHUB_OUTPUT"
+
+  # Each row on each architecture, built natively (arm64 on GitHub's arm64
+  # runners), with its ConfigMap YAML.
+  assets:
+    name: assets (ngf ${{ matrix.ngf }}, ${{ matrix.arch }})
+    needs: versions
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        ngf: ${{ fromJSON(needs.versions.outputs.ngf) }}
+        arch: [amd64, arm64]
+    steps:
+      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build the module and its ConfigMap
+        env:
+          TAG: ${{ github.ref_name }}
+          NGF: ${{ matrix.ngf }}
+          ARCH: ${{ matrix.arch }}
+        run: make release-build VERSION="$TAG" NGF="$NGF" RELEASE_ARCHES="$ARCH"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-ngf${{ matrix.ngf }}-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  # The only job that can write: checksums, provenance, and the release.
+  publish:
+    needs: [ci, kind, assets]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # create the release and upload its assets
+      id-token: write # sign the provenance attestations
+      attestations: write
+    steps:
+      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: make release-checksums
+      - name: Release notes from the CHANGELOG
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! scripts/changelog-section.sh "$TAG" > release-notes.md; then
+            echo "::error::CHANGELOG.md has no section for $TAG; add it before tagging"
+            exit 1
+          fi
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.so
+            dist/*.yaml
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          prerelease=""
+          case "$TAG" in *-*) prerelease="--prerelease" ;; esac
+          # --verify-tag: the tag must already exist on GitHub; never creates one.
+          # Assets are attached in the same call so an immutable release is complete when published.
+          gh release create "$TAG" --verify-tag --title "$TAG" --notes-file release-notes.md $prerelease \
+            dist/*.so dist/*.yaml dist/SHA256SUMS

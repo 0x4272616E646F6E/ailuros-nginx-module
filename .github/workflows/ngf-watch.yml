@@ -1,0 +1,73 @@
+name: ngf-watch
+
+on:
+  schedule:
+    - cron: "43 5 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  # Opens a PR; it never merges one. Merging (and so adding a supported NGF)
+  # is a human decision after CI has run on the PR.
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write # push the ngf-watch/* branch
+      pull-requests: write # open the PR
+    steps:
+      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Resolve new NGF releases (read-only) and verify the NGINX source
+        id: update
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          added=$(scripts/ngf-watch.sh)
+          if [ -z "$added" ]; then
+            echo "versions.json is current"
+            exit 0
+          fi
+          {
+            echo "versions=$(printf '%s' "$added" | paste -sd, -)"
+            echo "changed=true"
+          } >> "$GITHUB_OUTPUT"
+          git --no-pager diff versions.json
+      - name: Open the pull request
+        if: steps.update.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          VERSIONS: ${{ steps.update.outputs.versions }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          branch="ngf-watch/ngf-$(printf '%s' "$VERSIONS" | tr ',' '-')"
+          if [ -n "$(gh pr list --repo "$REPO" --head "$branch" --state open --json number --jq '.[].number')" ]; then
+            echo "a PR for $branch is already open"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          gh auth setup-git
+          git switch -c "$branch"
+          git add versions.json
+          git commit -m "Support NGF $(printf '%s' "$VERSIONS" | sed 's/,/, /g')"
+          git push origin "$branch"
+          gh pr create --repo "$REPO" --head "$branch" --base main \
+            --title "Support NGF $(printf '%s' "$VERSIONS" | sed 's/,/, /g')" \
+            --body "Adds NGF $(printf '%s' "$VERSIONS" | sed 's/,/, /g') to \`versions.json\` (newest three kept; older rows drop out).
+
+          The NGINX version comes from \`nginx -V\` in the stock data plane image. The NGINX source tarball was verified against the pinned nginx.org signing keys in \`.github/nginx-keys/\` and its SHA-256 recorded.
+
+          Before merging: check CI (the build, behaviour and kind jobs run against the new row), that the nginx container is still \`containers/0\` in NGF's pod template, and update the README table and \`deploy/ngf/\` for the new version. This PR is opened by a scheduled workflow; it is never merged automatically.
+
+          Opened by $RUN_URL"

@@ -7,6 +7,7 @@ package contract
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -18,26 +19,14 @@ import (
 // ailurosImage is ghcr.io/0x4272616e646f6e/ailuros:0.1.0, pinned by digest.
 const ailurosImage = "ghcr.io/0x4272616e646f6e/ailuros@sha256:b7540bacf0a1729bba473f728119157cc584f28449aa52b763d5e502f41db273"
 
-// The /_ailuros location sets the NGINX header pair from the real request,
-// blanks the Traefik pair so a client cannot make Ailuros see both sets, and
-// ignores X-Accel-* from Ailuros, as the shipped config does.
-const conf = `
+// The /_ailuros location is the one in deploy/ngf/snippetspolicy.yaml, read
+// from that file and reindented, with only the Ailuros host swapped for the
+// compose service name (see shippedLocation).
+var conf = `
 server {
     listen 8080;
 
-    location = /_ailuros {
-        internal;
-        proxy_pass http://ailuros:9002;
-        proxy_pass_request_body off;
-        proxy_set_header Content-Length "";
-        proxy_set_header X-Original-URI $request_uri;
-        proxy_set_header X-Original-Method $request_method;
-        proxy_set_header X-Forwarded-Uri "";
-        proxy_set_header X-Forwarded-Method "";
-        proxy_ignore_headers X-Accel-Redirect X-Accel-Expires X-Accel-Limit-Rate X-Accel-Buffering X-Accel-Charset;
-        proxy_connect_timeout 1s;
-        proxy_read_timeout 5s;
-    }
+` + shippedLocation() + `
 
     location /closed/ {
         ailuros_request /_ailuros;
@@ -59,6 +48,37 @@ server {
     location = /__harness_ready { return 204; }
 }
 `
+
+// shippedLocation returns the `location = /_ailuros { ... }` block of
+// deploy/ngf/snippetspolicy.yaml, byte for byte (the `value: |` indentation
+// replaced by the test config's), except that the Service host
+// ailuros.default.svc.cluster.local becomes the compose service "ailuros".
+func shippedLocation() string {
+	data, err := os.ReadFile("../../deploy/ngf/snippetspolicy.yaml")
+	if err != nil {
+		panic(err)
+	}
+	const indent = "        " // the snippet's indentation in the YAML
+	var out []string
+	in := false
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == indent+"location = /_ailuros {" {
+			in = true
+		}
+		if !in {
+			continue
+		}
+		out = append(out, "    "+strings.TrimPrefix(line, indent))
+		if line == indent+"}" {
+			break
+		}
+	}
+	loc := strings.Join(out, "\n")
+	if !in || !strings.HasSuffix(loc, "    }") || !strings.Contains(loc, "proxy_pass http://ailuros.default.svc.cluster.local:9002/;") {
+		panic("deploy/ngf/snippetspolicy.yaml: /_ailuros location not found in the expected form")
+	}
+	return strings.Replace(loc, "ailuros.default.svc.cluster.local", "ailuros", 1)
+}
 
 var requestID = regexp.MustCompile(`^[0-9a-f]{16}$`)
 

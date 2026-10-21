@@ -30,6 +30,7 @@ spec:
             internal;
             proxy_pass http://ailuros.default.svc.cluster.local:9002/;
             proxy_pass_request_body off;
+            proxy_cache off;
             proxy_set_header Content-Length "";
             # The NGINX header pair, from the real request; the Traefik pair
             # is blanked so a client cannot make Ailuros see both.
@@ -48,10 +49,10 @@ spec:
         # ailuros_request is off; the filters set it again per route.
         ailuros_request_set $ailuros_request_id $upstream_http_x_ailuros_request_id;
 
-        # At server level, once: a location-level add_header would drop the
-        # server-level ones. Empty (so not sent) where Ailuros is not attached.
         # Drop any X-Ailuros-Request-Id an upstream app sends, so only the
         # module-set value above reaches clients.
         proxy_hide_header X-Ailuros-Request-Id;
 
+        # At server level, once: a location-level add_header would drop the
+        # server-level ones. Empty (so not sent) where Ailuros is not attached.
         add_header X-Ailuros-Request-Id $ailuros_request_id always;

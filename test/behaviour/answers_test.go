@@ -21,6 +21,7 @@ server {
         internal;
         proxy_pass http://ailuros:9002;
         proxy_pass_request_body off;
+        proxy_cache off;
         proxy_set_header Content-Length "";
         proxy_set_header X-Original-URI $request_uri;
         proxy_set_header X-Original-Method $request_method;

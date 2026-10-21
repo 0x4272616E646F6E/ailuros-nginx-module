@@ -15,6 +15,7 @@ const ailurosLocation = `
         internal;
         proxy_pass http://ailuros:9002;
         proxy_pass_request_body off;
+        proxy_cache off;
         proxy_set_header Content-Length "";
         proxy_connect_timeout 1s;
         proxy_read_timeout 1s;

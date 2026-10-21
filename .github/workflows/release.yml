@@ -152,10 +152,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
         run: |
-          prerelease=""
-          case "$TAG" in *-*) prerelease="--prerelease" ;; esac
+          # The tag must still point at the commit this run tested and built.
+          current=$(gh api "repos/$REPO/commits/$TAG" --jq .sha)
+          if [ "$current" != "$GITHUB_SHA" ]; then
+            echo "::error::tag $TAG now points at $current, not $GITHUB_SHA; refusing to release"
+            exit 1
+          fi
+          flags=(--verify-tag --title "$TAG" --notes-file release-notes.md)
+          case "$TAG" in *-*) flags+=(--prerelease) ;; esac
           # --verify-tag: the tag must already exist on GitHub; never creates one.
           # Assets are attached in the same call so an immutable release is complete when published.
-          gh release create "$TAG" --verify-tag --title "$TAG" --notes-file release-notes.md $prerelease \
-            dist/*.so dist/*.yaml dist/SHA256SUMS
+          gh release create "$TAG" "${flags[@]}" dist/*.so dist/*.yaml dist/SHA256SUMS

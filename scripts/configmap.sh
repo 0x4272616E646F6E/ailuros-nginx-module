@@ -25,22 +25,23 @@ if [ -z "$version" ]; then
 	version=$(basename "$so" | sed -n 's/^ngx_http_ailuros_module-\(.*\)-ngf[0-9.]*-linux-[a-z0-9]*\.so$/\1/p')
 fi
 version=${version:-dev}
-case $version in *[!A-Za-z0-9._-]* | -* | .* | *- | *.) echo "$0: $version is not a valid label value" >&2; exit 1 ;; esac
+case $version in *[!A-Za-z0-9._-]* | [!A-Za-z0-9]* | *[!A-Za-z0-9]) echo "$0: $version is not a valid label value" >&2; exit 1 ;; esac
 [ ${#version} -le 63 ] || { echo "$0: version label too long" >&2; exit 1; }
 
 # base64 differs between GNU (wraps at 76) and BSD; strip newlines either way.
 data=$(base64 <"$so" | tr -d '\n')
 
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
 {
 	printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: ailuros-nginx-module-ngf%s\n' "$ngf"
 	[ -z "$ns" ] || printf '  namespace: %s\n' "$ns"
 	printf '  labels:\n    app.kubernetes.io/name: ailuros-nginx-module\n    app.kubernetes.io/version: %s\n    ailuros.dev/arch: %s\n' "$version" "$arch"
 	printf 'binaryData:\n  ngx_http_ailuros_module.so: %s\n' "$data"
-} >"${TMPDIR:-/tmp}/configmap.$$"
-trap 'rm -f "${TMPDIR:-/tmp}/configmap.$$"' EXIT
-size=$(wc -c <"${TMPDIR:-/tmp}/configmap.$$" | tr -d ' ')
+} >"$tmp"
+size=$(wc -c <"$tmp" | tr -d ' ')
 if [ "$size" -gt 1048576 ]; then
 	echo "$0: ConfigMap would be $size bytes, over the 1 MiB Kubernetes limit" >&2
 	exit 1
 fi
-cat "${TMPDIR:-/tmp}/configmap.$$"
+cat "$tmp"

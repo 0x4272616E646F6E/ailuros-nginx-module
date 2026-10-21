@@ -71,6 +71,7 @@ jobs:
         env:
           NGF: ${{ matrix.ngf }}
         run: |
-          export PATH="$(go env GOPATH)/bin:$PATH"
+          gopath=$(go env GOPATH)
+          export PATH="$gopath/bin:$PATH"
           make build NGF="$NGF" ARCH=amd64 VERSION=dev
           make test-kind NGF="$NGF"

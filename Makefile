@@ -96,13 +96,16 @@ cppcheck:
 # under QEMU emulation.
 RELEASE_ARCHES = amd64 arm64
 .PHONY: release-build release-checksums
-release-assets: release-clean release-build release-checksums
+release-assets:
+	@$(MAKE) --no-print-directory release-clean
+	@$(MAKE) --no-print-directory release-build
+	@$(MAKE) --no-print-directory release-checksums
 
 release-clean:
 	rm -rf dist
 
 release-build:
-	@test "$(VERSION)" != dev || { echo "VERSION is required, e.g. make release-assets VERSION=v0.1.0" >&2; exit 1; }
+	@test -n "$(VERSION)" && test "$(VERSION)" != dev || { echo "VERSION is required, e.g. make release-assets VERSION=v0.1.0" >&2; exit 1; }
 	@command -v jq >/dev/null || { echo "jq is required but not installed" >&2; exit 1; }
 	mkdir -p dist out
 	set -e; for ngf in $$(jq -r --arg ngf '$(NGF)' '.[] | select($$ngf == "" or .ngf == $$ngf) | .ngf' versions.json); do \

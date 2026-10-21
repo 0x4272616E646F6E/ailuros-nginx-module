@@ -6,6 +6,8 @@
 # signature against the pinned keys (scripts/verify-nginx-source.sh) and
 # records the tarball's SHA-256. Rewrites $VERSIONS_FILE (default versions.json)
 # only if something changed, and prints the added NGF versions, one per line.
+# If NOTES_FILE is set, appends one line per added row there with the NGINX
+# version and the digest of the image `nginx -V` ran in (for the PR body).
 #
 # NGF_TAGS (optional): newline-separated release tags to use instead of
 # querying `gh api repos/nginx/nginx-gateway-fabric/releases`.
@@ -15,6 +17,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 file=${VERSIONS_FILE:-versions.json}
 image=${NGF_IMAGE:-ghcr.io/nginx/nginx-gateway-fabric/nginx}
 keep=3
+verify=${VERIFY_SCRIPT:-$here/verify-nginx-source.sh}
 semver='^[0-9]+\.[0-9]+\.[0-9]+$'
 
 if [ -n "${NGF_TAGS:-}" ]; then
@@ -44,6 +47,8 @@ for ngf in $target; do
 		echo "$0: cannot run $image:$ngf (image not published yet?); skipping" >&2
 		continue
 	}
+	digest=$(docker image inspect --format '{{index .RepoDigests 0}}' "$image:$ngf" 2>/dev/null || true)
+	[ -n "$digest" ] || digest="$image:$ngf (no digest)"
 	nginx=$(printf '%s\n' "$out" | sed -n 's|^nginx version: nginx/\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$|\1|p' | head -n 1)
 	[ -n "$nginx" ] || { echo "$0: no NGINX version in nginx -V output of $image:$ngf" >&2; exit 1; }
 
@@ -51,14 +56,26 @@ for ngf in $target; do
 	mkdir -p "$dir"
 	curl -fsSL --retry 3 -o "$dir/nginx.tar.gz" "https://nginx.org/download/nginx-$nginx.tar.gz"
 	curl -fsSL --retry 3 -o "$dir/nginx.tar.gz.asc" "https://nginx.org/download/nginx-$nginx.tar.gz.asc"
-	sha=$("$here/verify-nginx-source.sh" "$dir/nginx.tar.gz" "$dir/nginx.tar.gz.asc")
+	sha=$("$verify" "$dir/nginx.tar.gz" "$dir/nginx.tar.gz.asc")
 	printf '%s\n' "$sha" | grep -Eq '^[0-9a-f]{64}$'
+
+	# A correctly signed tarball of some other version must not be recorded.
+	top=$(tar -tzf "$dir/nginx.tar.gz" | sed -n 1p)
+	hdr=$(tar -xzOf "$dir/nginx.tar.gz" "nginx-$nginx/src/core/nginx.h" | sed -n 's/^#define NGINX_VERSION *"\(.*\)"$/\1/p')
+	if [ "$top" != "nginx-$nginx/" ] || [ "$hdr" != "$nginx" ]; then
+		echo "$0: tarball is not NGINX $nginx (top dir '$top', NGINX_VERSION '$hdr')" >&2
+		exit 1
+	fi
 
 	jq --arg ngf "$ngf" --arg nginx "$nginx" --arg sha "$sha" \
 		'. + [{ngf: $ngf, nginx: $nginx, nginx_sha256: $sha}]' "$work/rows.json" >"$work/next.json"
 	mv "$work/next.json" "$work/rows.json"
 	added="$added$ngf
 "
+	if [ -n "${NOTES_FILE:-}" ]; then
+		# shellcheck disable=SC2016 # the backticks are Markdown, not command substitution
+		printf -- '- NGF %s: NGINX %s, source SHA-256 `%s`, image `%s`\n' "$ngf" "$nginx" "$sha" "$digest" >>"$NOTES_FILE"
+	fi
 done
 
 # Newest three only, newest first.

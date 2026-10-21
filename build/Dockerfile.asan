@@ -1,0 +1,165 @@
+# syntax=docker/dockerfile:1
+# TEST-ONLY image: NGINX and the Ailuros module built with AddressSanitizer
+# and UBSan, for the behaviour suite (make test-asan). Built locally, never
+# published, never run in a cluster. NGINX comes from the same SHA-256-verified
+# tarball as build/Dockerfile. The layout mirrors the NGF data plane image so
+# the harness configs work unchanged: /etc/nginx/nginx.conf includes
+# main-includes/*.conf, conf.d/*.conf and events-includes/*.conf, the module is
+# at the production mount path, and nginx runs as uid 101 / gid 1001.
+
+ARG DEBIAN=debian:trixie-slim
+
+FROM ${DEBIAN} AS build
+ARG NGINX_VERSION
+ARG NGINX_SHA256
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential ca-certificates wget libpcre2-dev libssl-dev zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN set -eu; \
+    wget -qO /tmp/nginx.tar.gz "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"; \
+    got="$(sha256sum /tmp/nginx.tar.gz | cut -d' ' -f1)"; \
+    if [ "$got" != "${NGINX_SHA256}" ]; then \
+        echo "ERROR: NGINX_SHA256 mismatch for nginx-${NGINX_VERSION}.tar.gz: expected ${NGINX_SHA256}, got $got" >&2; exit 1; \
+    fi; \
+    mkdir /src && tar -xzf /tmp/nginx.tar.gz -C /src --strip-components=1 && rm /tmp/nginx.tar.gz
+COPY module /src/module
+# A tiny static add-on carrying the sanitizers' default options inside the
+# binary. NGINX discards its processes' environment except `env` variables, and
+# the sanitizer runtimes may read *_OPTIONS only after that, so the options are
+# also compiled in (an *_OPTIONS variable, when seen, still overrides them).
+COPY <<'CFG' /src/sanitizer-defaults/config
+ngx_addon_name=ngx_sanitizer_defaults
+CORE_SRCS="$CORE_SRCS src/core/ngx_sanitizer_defaults.c"
+CFG
+COPY <<'SRC' /src/src/core/ngx_sanitizer_defaults.c
+const char *__asan_default_options(void)
+{
+    return "detect_leaks=1:abort_on_error=1:detect_odr_violation=0";
+}
+
+const char *__ubsan_default_options(void)
+{
+    return "halt_on_error=1:print_stacktrace=1:suppressions=/etc/nginx/ubsan.supp";
+}
+SRC
+WORKDIR /src
+# Modules: everything the behaviour configs use (http_v2, ssl, auth_request;
+# limit_req and limit_conn are core) plus the stock image's realip and
+# stub_status (the NGF nginx.conf serves stub_status on a unix socket).
+RUN ./configure \
+        --prefix=/etc/nginx --sbin-path=/usr/sbin/nginx \
+        --modules-path=/usr/lib/nginx/modules --conf-path=/etc/nginx/nginx.conf \
+        --error-log-path=/var/log/nginx/error.log --http-log-path=/var/log/nginx/access.log \
+        --pid-path=/var/run/nginx/nginx.pid --lock-path=/var/run/nginx/nginx.lock \
+        --http-client-body-temp-path=/var/cache/nginx/client_temp \
+        --http-proxy-temp-path=/var/cache/nginx/proxy_temp \
+        --http-fastcgi-temp-path=/var/cache/nginx/fastcgi_temp \
+        --http-uwsgi-temp-path=/var/cache/nginx/uwsgi_temp \
+        --http-scgi-temp-path=/var/cache/nginx/scgi_temp \
+        --user=nginx --group=nginx \
+        --with-compat --with-debug \
+        --with-http_v2_module --with-http_ssl_module \
+        --with-http_auth_request_module --with-http_realip_module \
+        --with-http_stub_status_module \
+        --with-cc-opt='-fsanitize=address,undefined -fno-omit-frame-pointer -O1 -g' \
+        --with-ld-opt='-fsanitize=address,undefined' \
+        --add-module=/src/sanitizer-defaults \
+        --add-dynamic-module=/src/module \
+    && make -j"$(nproc)" && make install DESTDIR=/stage \
+    && mkdir -p /stage/etc/nginx/conf.d
+
+FROM ${DEBIAN} AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libasan8 libubsan1 libpcre2-8-0 libssl3t64 zlib1g procps \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -g 1001 nginx && useradd -u 101 -g 1001 -d /var/cache/nginx -s /usr/sbin/nologin nginx \
+    && mkdir -p /var/cache/nginx /var/log/nginx /usr/lib/nginx/modules/ailuros \
+        /etc/nginx/main-includes /etc/nginx/events-includes /etc/nginx/conf.d \
+    && chown nginx:nginx /var/cache/nginx \
+    && ln -sf /dev/stdout /var/log/nginx/access.log && ln -sf /dev/stderr /var/log/nginx/error.log
+COPY --from=build /stage/usr/sbin/nginx /usr/sbin/nginx
+COPY --from=build /stage/etc/nginx/mime.types /etc/nginx/mime.types
+COPY --from=build --chmod=0444 /stage/usr/lib/nginx/modules/ngx_http_ailuros_module.so /usr/lib/nginx/modules/ailuros/ngx_http_ailuros_module.so
+RUN chmod 0555 /usr/lib/nginx/modules/ailuros && ln -s /usr/lib/nginx/modules /etc/nginx/modules
+# The NGF nginx.conf (2.8.0) without its njs imports and stream block, which
+# the module and the behaviour suite do not touch.
+COPY <<'CONF' /etc/nginx/nginx.conf
+include /etc/nginx/main-includes/*.conf;
+
+pid /var/run/nginx/nginx.pid;
+
+events {
+  include /etc/nginx/events-includes/*.conf;
+}
+
+http {
+  include /etc/nginx/mime.types;
+
+  default_type application/octet-stream;
+
+  proxy_headers_hash_bucket_size 512;
+  proxy_headers_hash_max_size 1024;
+  server_names_hash_bucket_size 512;
+  server_names_hash_max_size 1024;
+  variables_hash_bucket_size 512;
+  variables_hash_max_size 1024;
+  map_hash_bucket_size 512;
+  map_hash_max_size 2048;
+
+  sendfile on;
+  tcp_nopush on;
+
+  include /etc/nginx/conf.d/*.conf;
+
+  server {
+    listen unix:/var/run/nginx/nginx-status.sock;
+    access_log off;
+
+    location /stub_status {
+        stub_status;
+    }
+  }
+}
+CONF
+# NGINX 1.31.7 itself passes a null pointer with length 0 to memcpy when
+# proxy_pass has no URI part (ngx_http_proxy_module.c:1398, ctx->vars.uri.data).
+# That is core NGINX undefined behaviour with no effect, hit by every proxied
+# request. This one check (nonnull-attribute) is suppressed for that one file;
+# everything else in it, and all of the module, stays checked.
+COPY <<'SUPP' /etc/nginx/ubsan.supp
+nonnull-attribute:src/http/modules/ngx_http_proxy_module.c
+SUPP
+# Options as the brief states them. NGINX discards its processes' environment,
+# so the sanitizers may never see these variables in the workers; the same
+# options are compiled in above (ngx_sanitizer_defaults.c), which is what the
+# workers use. A sanitizer error aborts and prints to stderr; detect_leaks stays on.
+# detect_odr_violation=0: NGINX's dynamic-module build defines ngx_modules,
+# ngx_module_names and ngx_module_order in the core and again in every module's
+# generated *_modules.c, which ASan reports as an ODR violation at dlopen. That
+# is how NGINX loads modules, not a defect of this module; it is the only ASan
+# check turned off.
+ENV ASAN_OPTIONS=detect_leaks=1:abort_on_error=1:detect_odr_violation=0 \
+    UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1:suppressions=/etc/nginx/ubsan.supp
+USER 101:1001
+ENTRYPOINT ["nginx", "-g", "daemon off; master_process on;"]
+
+# Config check as the unprivileged user, with the module at the production path.
+FROM runtime AS verify
+USER root
+RUN printf '%s\n' \
+        'load_module /usr/lib/nginx/modules/ailuros/ngx_http_ailuros_module.so;' \
+        'pid /tmp/nginx.pid;' \
+        'events {}' \
+        'http { server { listen 8080;' \
+        '    location = /_ailuros { internal; return 200; }' \
+        '    location / { ailuros_request /_ailuros; return 200; } } }' \
+        > /tmp/verify.conf
+USER 101:1001
+# nginx -t exits without freeing its cycle pool (core allocations only), so
+# leak detection is off for this one config check; the suite runs with it on.
+RUN ASAN_OPTIONS=detect_leaks=0:detect_odr_violation=0 nginx -t -c /tmp/verify.conf
+
+FROM scratch AS export
+COPY --from=build /stage/usr/lib/nginx/modules/ngx_http_ailuros_module.so /ngx_http_ailuros_module.so
+
+FROM runtime

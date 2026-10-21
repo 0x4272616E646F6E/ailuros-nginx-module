@@ -84,10 +84,8 @@ func Up(t *testing.T, cfg Config) *Stack {
 	buildStub(t)
 
 	so := ModuleSO(t)
-	image := cfg.ModuleImage
-	if image == "" {
-		image = StockImage(t)
-	}
+	image := moduleImage(t, cfg)
+	sanitized := image != StockImage(t)
 
 	dir := confDir(t, cfg.NGINXConf)
 	compose := fmt.Sprintf(composeTemplate, image, so, ModulePath,
@@ -109,8 +107,16 @@ func Up(t *testing.T, cfg Config) *Stack {
 		},
 	}
 	t.Cleanup(func() {
-		if t.Failed() {
-			t.Logf("nginx log of %s:\n%s", s.project, s.logs())
+		if sanitized {
+			// A graceful stop lets the sanitizers' exit-time checks (leaks) run
+			// and print before the log is read.
+			_, _ = s.compose("stop", "--timeout", "30", "nginx")
+		}
+		log := s.logs()
+		if marker := sanitizerReport(log); marker != "" {
+			t.Errorf("nginx reported %q (sanitizer error); log of %s:\n%s", marker, s.project, log)
+		} else if t.Failed() {
+			t.Logf("nginx log of %s:\n%s", s.project, log)
 		}
 		_, _ = s.compose("down", "--volumes", "--remove-orphans", "--timeout", "1")
 	})
@@ -126,6 +132,33 @@ func Up(t *testing.T, cfg Config) *Stack {
 	}
 	s.waitReady(t)
 	return s
+}
+
+// sanitizerMarkers are what AddressSanitizer (including LeakSanitizer) and
+// UBSan print to stderr when they find an error.
+var sanitizerMarkers = []string{"ERROR: AddressSanitizer", "ERROR: LeakSanitizer", "runtime error:"}
+
+// sanitizerReport returns the first sanitizer marker found in an NGINX log.
+func sanitizerReport(log string) string {
+	for _, m := range sanitizerMarkers {
+		if strings.Contains(log, m) {
+			return m
+		}
+	}
+	return ""
+}
+
+// moduleImage is the NGINX image: cfg.ModuleImage, else $AILUROS_MODULE_IMAGE
+// (set by make test-asan), else the stock NGF image.
+func moduleImage(t *testing.T, cfg Config) string {
+	t.Helper()
+	if cfg.ModuleImage != "" {
+		return cfg.ModuleImage
+	}
+	if v := os.Getenv("AILUROS_MODULE_IMAGE"); v != "" {
+		return v
+	}
+	return StockImage(t)
 }
 
 // ModuleSO returns the absolute path of the module the stack mounts.
@@ -195,6 +228,7 @@ func CheckConfig(t *testing.T, conf string) (ok bool, output string) {
 	requireDocker(t)
 	so := ModuleSO(t)
 	dir := confDir(t, conf)
+	image := moduleImage(t, Config{})
 	args := []string{"run", "--rm", "--user", "101:1001", "--entrypoint", "nginx",
 		"--tmpfs", "/var/run/nginx:mode=1777",
 		"-v", so + ":" + ModulePath + ":ro",
@@ -202,7 +236,13 @@ func CheckConfig(t *testing.T, conf string) (ok bool, output string) {
 		"-v", filepath.Join(dir, "harness.conf") + ":/etc/nginx/main-includes/harness.conf:ro",
 		"-v", filepath.Join(dir, "default.conf") + ":/etc/nginx/conf.d/default.conf:ro",
 		"-v", filepath.Join(dir, "tls") + ":/etc/nginx/test-tls:ro",
-		StockImage(t), "-t"}
+		image, "-t"}
+	if image != StockImage(t) {
+		// nginx -t exits without freeing its cycle pool, which LeakSanitizer
+		// reports as a leak of core allocations; the served stack keeps leak
+		// detection on.
+		args = append([]string{"run", "--env", "ASAN_OPTIONS=detect_leaks=0"}, args[1:]...)
+	}
 	out, err := run(2*time.Minute, "docker", args...)
 	var exit *exec.ExitError
 	if err != nil && !errors.As(err, &exit) {

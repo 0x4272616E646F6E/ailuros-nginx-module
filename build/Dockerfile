@@ -37,14 +37,19 @@ RUN ./configure --with-compat --add-dynamic-module=/src/module \
 
 FROM ghcr.io/nginx/nginx-gateway-fabric/nginx:${NGF_VERSION} AS verify
 USER root
-COPY --from=module /src/objs/ngx_http_ailuros_module.so /usr/lib/nginx/modules/ngx_http_ailuros_module.so
-RUN printf '%s\n' \
-        'load_module /usr/lib/nginx/modules/ngx_http_ailuros_module.so;' \
+# Mirror the production layout: read-only file in a read-only directory at the
+# path NGF mounts the ConfigMap, loaded by the unprivileged data plane user.
+RUN mkdir -p /usr/lib/nginx/modules/ailuros
+COPY --from=module --chmod=0444 /src/objs/ngx_http_ailuros_module.so /usr/lib/nginx/modules/ailuros/ngx_http_ailuros_module.so
+RUN chmod 0555 /usr/lib/nginx/modules/ailuros \
+    && printf '%s\n' \
+        'load_module /usr/lib/nginx/modules/ailuros/ngx_http_ailuros_module.so;' \
         'pid /tmp/nginx.pid;' \
         'events {}' \
         'http { server { listen 8080; ailuros on; } }' \
-        > /tmp/verify.conf \
-    && nginx -t -c /tmp/verify.conf
+        > /tmp/verify.conf
+USER 101
+RUN nginx -t -c /tmp/verify.conf
 
 FROM scratch AS export
 COPY --from=module /src/objs/ngx_http_ailuros_module.so /ngx_http_ailuros_module.so

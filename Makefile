@@ -17,6 +17,8 @@ BUILD_ARGS = --build-arg NGF_VERSION=$(NGF) \
 .PHONY: build verify test check-ngf clean
 
 check-ngf:
+	@command -v jq >/dev/null || { echo "jq is required but not installed" >&2; exit 1; }
+	@test -r versions.json || { echo "versions.json is missing or unreadable" >&2; exit 1; }
 	@test -n "$(NGF)" || { echo "NGF is required, e.g. make build NGF=2.8.0" >&2; exit 1; }
 	@test -n "$(ROW)" || { echo "NGF $(NGF) not found in versions.json" >&2; exit 1; }
 

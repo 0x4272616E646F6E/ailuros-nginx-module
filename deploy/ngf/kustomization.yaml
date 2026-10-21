@@ -1,0 +1,10 @@
+# kubectl apply -k deploy/ngf
+# The ConfigMap holding the module is a release asset, ailuros-nginx-module-ngf<ngf>-<arch>.yaml.
+# Either add it here as a remote resource (pin the version and architecture):
+#   - https://github.com/0x4272616E646F6E/ailuros-nginx-module/releases/download/v<version>/ailuros-nginx-module-ngf2.8.0-<arch>.yaml
+# or apply it separately, or commit it next to these files.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - snippetspolicy.yaml
+  - snippetsfilters.yaml

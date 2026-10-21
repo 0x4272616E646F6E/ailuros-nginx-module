@@ -598,6 +598,18 @@ func requireDocker(t *testing.T) {
 	}
 }
 
+// BuildStubImage builds the stub image (Ailuros, tinyauth, echo, model roles)
+// once per test run and returns its local tag.
+func BuildStubImage(t *testing.T) string {
+	t.Helper()
+	requireDocker(t)
+	buildStub(t)
+	return stubImage
+}
+
+// DockerArch is the Docker host's architecture as amd64 or arm64.
+func DockerArch(t *testing.T) string { return dockerArch(t) }
+
 func dockerArch(t *testing.T) string {
 	t.Helper()
 	out, err := run(30*time.Second, "docker", "info", "--format", "{{.Architecture}}")

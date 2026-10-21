@@ -16,7 +16,7 @@ BUILD_ARGS = --build-arg NGF_VERSION=$(NGF) \
 
 BUILD_ARGS_ASAN = --build-arg NGINX_VERSION=$(NGINX_VERSION) --build-arg NGINX_SHA256=$(NGINX_SHA256)
 
-.PHONY: build verify test test-asan test-contract cppcheck check-ngf clean
+.PHONY: build verify test test-asan test-contract test-kind cppcheck check-ngf clean
 
 check-ngf:
 	@command -v jq >/dev/null || { echo "jq is required but not installed" >&2; exit 1; }
@@ -58,8 +58,16 @@ test-asan: check-ngf
 # The module against the published Ailuros (pinned by digest in
 # test/contract/contract_test.go) and a stub model. Needs the module built:
 # make build NGF=<ngf> ARCH=<host arch> VERSION=dev, or AILUROS_MODULE_SO.
-test-contract:
+test-contract: check-ngf
 	cd test && AILUROS_NGF=$(NGF) go test ./contract/... -count=1 -timeout 15m $(TESTFLAGS)
+
+# NGF-in-kind end to end: installs deploy/ngf/ into a real NGF in a throwaway
+# kind cluster (ailuros-module-it, temporary kubeconfig; yours is never used).
+# Needs docker, kind, kubectl and helm, network access for the NGF chart and
+# images, and the module built: make build NGF=<ngf> ARCH=<host arch>
+# VERSION=dev, or AILUROS_MODULE_SO.
+test-kind: check-ngf
+	cd test && AILUROS_NGF=$(NGF) go test -tags kind ./kind/... -count=1 -timeout 30m -v $(TESTFLAGS)
 
 # Uses a local cppcheck if there is one, otherwise Alpine's package in a
 # throwaway container of the stock NGF image (NGF, or the first versions.json row).

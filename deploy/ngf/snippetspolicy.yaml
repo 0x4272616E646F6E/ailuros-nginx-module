@@ -1,0 +1,53 @@
+# One Gateway-wide SnippetsPolicy: loads the module and defines, once per
+# server, the internal location that asks Ailuros.
+#
+# Set before applying:
+#   metadata.namespace / targetRefs.name   the Gateway's namespace and name
+#   proxy_pass                             ailuros.<namespace>.svc.cluster.local
+#                                          (the Ailuros Service, forward-auth port 9002)
+apiVersion: gateway.nginx.org/v1alpha1
+kind: SnippetsPolicy
+metadata:
+  name: ailuros
+  namespace: default
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: gateway
+  snippets:
+    - context: main
+      value: |
+        load_module /usr/lib/nginx/modules/ailuros/ngx_http_ailuros_module.so;
+
+    - context: http.server
+      value: |
+        # Ailuros's forward-auth endpoint. Internal and answering itself: the
+        # module refuses answers from non-internal or named locations and from
+        # any internal redirect, and error_page does not apply here, so no
+        # rewrite or try_files.
+        location = /_ailuros {
+            internal;
+            proxy_pass http://ailuros.default.svc.cluster.local:9002/;
+            proxy_pass_request_body off;
+            proxy_set_header Content-Length "";
+            # The NGINX header pair, from the real request; the Traefik pair
+            # is blanked so a client cannot make Ailuros see both.
+            proxy_set_header X-Original-Method $request_method;
+            proxy_set_header X-Original-URI $request_uri;
+            proxy_set_header X-Forwarded-Method "";
+            proxy_set_header X-Forwarded-Uri "";
+            proxy_ignore_headers X-Accel-Redirect X-Accel-Expires X-Accel-Limit-Rate X-Accel-Buffering X-Accel-Charset;
+            # Ailuros's classifier timeout defaults to 1s; leave 500ms.
+            proxy_connect_timeout 1s;
+            proxy_read_timeout 1500ms;
+        }
+
+        # Declares the variable the header below reads, so this policy is
+        # valid before any route lists a filter. Never runs where
+        # ailuros_request is off; the filters set it again per route.
+        ailuros_request_set $ailuros_request_id $upstream_http_x_ailuros_request_id;
+
+        # At server level, once: a location-level add_header would drop the
+        # server-level ones. Empty (so not sent) where Ailuros is not attached.
+        add_header X-Ailuros-Request-Id $ailuros_request_id always;

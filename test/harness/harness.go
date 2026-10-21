@@ -292,6 +292,15 @@ func (s *Stack) compose(args ...string) (string, error) {
 	return run(3*time.Minute, "docker", append([]string{"compose", "-p", s.project, "-f", s.file}, args...)...)
 }
 
+// state is a service container's state (running, exited, ...).
+func (s *Stack) state(svc string) string {
+	out, err := s.compose("ps", "--all", "--format", "{{.State}}", svc)
+	if err != nil {
+		return "unknown (" + strings.TrimSpace(out) + ")"
+	}
+	return strings.TrimSpace(out)
+}
+
 func (s *Stack) port(t *testing.T, svc, port string) string {
 	t.Helper()
 	out, err := s.compose("port", svc, port)
@@ -317,6 +326,9 @@ func (s *Stack) waitReady(t *testing.T) {
 			}
 			if time.Now().After(deadline) {
 				t.Fatalf("stack not ready: %s: %v\n%s", u, err, s.logs())
+			}
+			if state := s.state("nginx"); state != "running" && state != "created" && state != "restarting" {
+				t.Fatalf("nginx container is %s, not running:\n%s", state, s.logs())
 			}
 			time.Sleep(200 * time.Millisecond)
 		}

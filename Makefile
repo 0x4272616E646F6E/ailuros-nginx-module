@@ -36,8 +36,11 @@ verify: check-ngf
 	docker buildx build --platform linux/$(ARCH) $(BUILD_ARGS) -f build/Dockerfile \
 		--target verify --progress=plain --output type=cacheonly .
 
+# NGF selects the versions.json row (and so the stock image and the built
+# module) under test; unset, the first row is used. An unknown NGF fails.
 test:
-	cd test && go test ./...
+	@if [ -n "$(NGF)" ]; then $(MAKE) --no-print-directory check-ngf NGF=$(NGF); fi
+	cd test && AILUROS_NGF=$(NGF) go test ./... -count=1 -timeout 30m $(TESTFLAGS)
 
 # The behaviour suite against NGINX and the module built with AddressSanitizer
 # and UBSan (build/Dockerfile.asan), for the host's architecture. Local test

@@ -422,8 +422,14 @@ func TestStoredDecisionNotWritable(t *testing.T) {
 server { listen 8080; location / { return 200; } }`,
 		"ailuros_request_set": `server { listen 8080; ailuros_request_set $ailuros-request-outcome continue; location / { return 200; } }`,
 		"set":                 `server { listen 8080; location / { set $ailuros-request-outcome continue; return 200; } }`,
+		// njs is loaded by the stock NGF image's nginx.conf, not by the ASan image.
+		"js_set": `js_set $ailuros-request-outcome httpmatches.redirect;
+server { listen 8080; location / { return 200; } }`,
 	} {
 		t.Run(name, func(t *testing.T) {
+			if name == "js_set" && !harness.StockModuleImage(t) {
+				t.Skip("njs is only in the stock NGF image")
+			}
 			ok, out := harness.CheckConfig(t, conf)
 			if ok || !strings.Contains(out, `the duplicate "ailuros-request-outcome" variable`) {
 				t.Errorf("nginx -t ok = %v, want a duplicate variable error; output:\n%s", ok, out)

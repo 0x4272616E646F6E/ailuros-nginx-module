@@ -215,6 +215,13 @@ func StockImage(t *testing.T) string {
 	return "ghcr.io/nginx/nginx-gateway-fabric/nginx:" + NGFVersion(t)
 }
 
+// StockModuleImage reports whether the stack runs the stock NGF image (which
+// ships and loads njs) rather than a sanitizer build.
+func StockModuleImage(t *testing.T) bool {
+	t.Helper()
+	return moduleImage(t, Config{}) == StockImage(t)
+}
+
 // NGFVersion is $AILUROS_NGF, or the first version in versions.json.
 func NGFVersion(t *testing.T) string {
 	t.Helper()

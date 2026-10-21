@@ -98,7 +98,7 @@ Releases are immutable, so a published asset cannot be replaced.
 Installation on NGF (example manifests in `deploy/ngf/`):
 
 1. The ConfigMap, in the namespace where NGF runs the NGINX pods, as a remote kustomize resource from the release URL (or the release's YAML committed, if a direct file URL is not accepted).
-2. An `nginx.patches` entry in NGF's Helm values mounting it read-only at `/usr/lib/nginx/modules/ailuros/` in the stock NGINX container. The ConfigMap name carries the NGF version, so a bump changes the pod template and rolls the pods.
+2. NGF's Helm values: `nginxGateway.snippets.enable: true` (snippets are off by default), and an `nginx.patches` entry mounting the ConfigMap read-only at `/usr/lib/nginx/modules/ailuros/` in the stock NGINX container. The patch must be `type: JSONPatch`, with an `add` to `/spec/template/spec/volumes/-` and an `add` to `/spec/template/spec/containers/0/volumeMounts/-` (`StrategicMerge` fails: NGF merges lists by index, so the patch overwrites NGF's own volumes and the Deployment is rejected). It addresses the nginx container by index (`containers/0`), which must be re-checked on each NGF upgrade. The ConfigMap name carries the NGF version, so a bump changes the pod template and rolls the pods.
 3. One Gateway-wide `SnippetsPolicy`:
    - `main`: `load_module /usr/lib/nginx/modules/ailuros/ngx_http_ailuros_module.so;`
    - `http.server`: the internal `location = /_ailuros` that proxies to Ailuros's forward-auth port, defined once per server (per-route definitions collide when one server has several rules)
@@ -112,7 +112,7 @@ Installation on NGF (example manifests in `deploy/ngf/`):
 
 Failure behaviour:
 
-- A directive used without the module loaded fails `nginx -t`; NGF rejects the config and the previous one keeps serving.
+- A directive used without the module loaded fails `nginx -t`; NGF rejects the config and the previous one keeps serving. The failure is reported on the Gateway (`Programmed=False`, reason `Invalid`, with the `nginx -t` output) and in the controller and data plane logs; the route and `SnippetsFilter` conditions stay green, so alert on the Gateway condition.
 - An NGF bump without a matching `.so`: new NGINX pods fail `load_module` and crash-loop while the rolling update keeps the old pods serving. The gateway stalls; it never runs without Ailuros.
 
 ### Versions and CI
@@ -145,7 +145,7 @@ Go tests driving Docker, as in Ailuros:
 3. **Sanitizers.** The same suite against the same NGINX version built on Debian with AddressSanitizer and UBSan (they do not work on the NGF image's Alpine).
 4. **Real Ailuros and NGF.**
    - Contract test: the published Ailuros image, pinned, with a minimal OpenAI-compatible stub model. It confirms the `X-Original-*` headers are read, allow and block, the request ID, and the `X-Forwarded-*` blanking.
-   - NGF in kind (weekly, on demand, before each release): real NGF with the Helm `nginx.patches` mount, the main-context `SnippetsPolicy`, per-route `SnippetsFilter`s, Ailuros and the tinyauth stub; allow, block and stacking end to end. It uses its own temporary kubeconfig.
+   - NGF in kind (weekly, on demand, before each release): real NGF with `nginxGateway.snippets.enable` and the Helm `nginx.patches` JSONPatch mount, the main-context `SnippetsPolicy`, per-route `SnippetsFilter`s, Ailuros and the tinyauth stub; allow, block and stacking end to end. It uses its own temporary kubeconfig.
 
 ## Verification before implementation
 
@@ -162,7 +162,7 @@ These are assumptions the design rests on; the first plan task checks each in a 
 Checked on kind (v0.33.0) with NGF 2.8.0 (Helm chart 2.8.0, Gateway API CRDs v1.6.3), using the stub module (`ailuros on;` adds `X-Ailuros-Module: enabled`), built inside the stock image: 126,824 bytes.
 
 - **`.so` from a ConfigMap mount: verified.** NGINX `dlopen`ed `/usr/lib/nginx/modules/ailuros/ngx_http_ailuros_module.so` from the ConfigMap volume (mounted `ro`, not `noexec`; the file is a symlink into the kubelet's `..data` directory) and a request through the Gateway returned the module's header. Ruling: the mount path in the global constraints stands.
-- **`load_module` in a `main`-context `SnippetsPolicy`: verified.** NGF writes the snippet to `/etc/nginx/includes/SnippetsPolicy_main_default-<name>.conf` and includes it from `/etc/nginx/main-includes/main.conf`, which `nginx.conf` includes before `events` and `http` (after the stock `load_module modules/ngx_http_js_module.so;`). The policy reports `Accepted` and `Programmed`. Two corrections to the install steps, now applied above:
+- **`load_module` in a `main`-context `SnippetsPolicy`: verified.** NGF writes the snippet to `/etc/nginx/includes/SnippetsPolicy_main_default-<name>.conf` and includes it from `/etc/nginx/main-includes/main.conf`, which `nginx.conf` includes before `events` and `http` (after the stock `load_module modules/ngx_http_js_module.so;`). The policy reports `Accepted` and `Programmed`. Two corrections to the install steps, applied in Delivery step 2:
   - Snippets are off by default; the Helm value is `nginxGateway.snippets.enable: true` (it adds `--snippets` to the controller). Without it the route's `SnippetsFilter` is "Not found" and the route serves 500.
   - `nginx.patches` with `type: StrategicMerge` is merged by list index, not by name, and the Deployment is rejected (volumes and mounts overwrite NGF's own). Use `type: JSONPatch` with `add` operations on `/spec/template/spec/volumes/-` and `/spec/template/spec/containers/0/volumeMounts/-` (the `nginx` container is first). The working values are in `deploy/ngf/` once Task 8 lands them.
 - **Directive without the module: verified (rejected, reported, old config serves).** With the `SnippetsPolicy` deleted and the route filter still using `ailuros on;`, NGF's `nginx -t` failed (`unknown directive "ailuros"`), the agent rolled back, and requests still returned 200 with the header. The failure shows as the Gateway's `Programmed=False` condition (reason `Invalid`, message carrying the `nginx -t` output) and in the NGF controller log (`Failed to update NGINX configuration`); the data plane log has "Config apply failed, rollback successful". The `HTTPRoute` and `SnippetsFilter` conditions stay green, so alert on the Gateway's `Programmed` condition. Re-applying the policy cleared it.

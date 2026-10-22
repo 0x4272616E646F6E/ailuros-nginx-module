@@ -1,13 +1,14 @@
 # Installing the module on NGINX Gateway Fabric
 
 Example manifests for NGF 2.8.0, the newest release in `versions.json`
-(a repo test keeps them in step). `make test-kind` applies them unmodified.
-The module is a ConfigMap mounted into NGF's stock NGINX image; no custom
-image is run.
+(a repo test keeps them in step). `make test-kind` applies them unmodified
+apart from the upstream request ID header variable, which follows the backend
+image it pins. The module is a ConfigMap mounted into NGF's stock NGINX
+image; no custom image is run.
 
 **Another supported NGF release.** The only version-specific parts are the
 chart version you install and the ConfigMap name in `helm-values-patch.yaml`
-(`ailuros-nginx-module-ngf<ngf>`). For an older row of `versions.json`, install
+(`decision-waf-nginx-module-ngf<ngf>`). For an older row of `versions.json`, install
 that chart version, use that release's ConfigMap asset and change the version
 in the name. `make test-kind NGF=<ngf>` makes exactly that substitution (in a
 temporary copy) and installs the matching chart, so every row is tested.
@@ -16,34 +17,34 @@ here (`test/repo` checks that they agree with `versions.json`).
 
 | File | What it does |
 |---|---|
-| `helm-values-patch.yaml` | Helm values: enables snippets and mounts the module ConfigMap into the NGINX container at `/usr/lib/nginx/modules/ailuros/` |
-| `snippetspolicy.yaml` | One Gateway `SnippetsPolicy`: `load_module`, the internal `/_ailuros` location that proxies to Ailuros, and the `X-Ailuros-Request-Id` response header |
-| `snippetsfilters.yaml` | `ailuros-check` (fail closed) and `ailuros-check-open` (fail open), attached per route |
+| `helm-values-patch.yaml` | Helm values: enables snippets and mounts the module ConfigMap into the NGINX container at `/usr/lib/nginx/modules/decision-waf/` |
+| `snippetspolicy.yaml` | One Gateway `SnippetsPolicy`: `load_module`, the internal `/_decision_waf` location that proxies to decision-waf, and the `X-Decision-Waf-Request-Id` response header |
+| `snippetsfilters.yaml` | `decision-waf-check` (fail closed) and `decision-waf-check-open` (fail open), attached per route |
 | `kustomization.yaml` | `kubectl apply -k` for the policy and the filters |
 
 ## Install
 
-1. **Gateway API CRDs and Ailuros.** Install the Gateway API CRDs NGF 2.8.0
-   documents, and run Ailuros with forward-auth on port 9002 behind a Service.
+1. **Gateway API CRDs and decision-waf.** Install the Gateway API CRDs NGF 2.8.0
+   documents, and run decision-waf with forward-auth on port 9002 behind a Service.
    The Service must exist before you apply the policy: `proxy_pass` has a
    literal host, which NGINX resolves when it loads the configuration, so
    without the Service `nginx -t` fails and NGF rejects the Gateway's config.
 2. **The module ConfigMap**, in the namespace where NGF runs the NGINX pods (the
    Gateway's namespace), before the pods start. Use the release asset
-   `ailuros-nginx-module-ngf2.8.0-<arch>.yaml` (match the cluster's CPU
+   `decision-waf-nginx-module-ngf2.8.0-<arch>.yaml` (match the cluster's CPU
    architecture), as a remote kustomize resource or committed next to these
    files. To make one from a local build:
-   `scripts/configmap.sh out/ngx_http_ailuros_module-<version>-ngf2.8.0-linux-<arch>.so 2.8.0 <arch> <namespace> | kubectl apply -f -`.
+   `scripts/configmap.sh out/ngx_http_decision_waf_module-<version>-ngf2.8.0-linux-<arch>.so 2.8.0 <arch> <namespace> | kubectl apply -f -`.
    Apply it with `kubectl apply --server-side`: client-side apply stores the object in the
    `last-applied-configuration` annotation (256 KiB cap) and the manifest is close to that. Flux
    applies server-side. Flux remote file resources are unverified; committing the release's YAML
    is the fallback.
-   The ConfigMap is named `ailuros-nginx-module-ngf2.8.0`; the name carries the
+   The ConfigMap is named `decision-waf-nginx-module-ngf2.8.0`; the name carries the
    NGF version, so an NGF bump changes the pod template and rolls the pods.
 3. **NGF**, with `helm-values-patch.yaml` merged into your values.
 4. **Edit `snippetspolicy.yaml`**: `metadata.namespace` and `targetRefs[0].name`
-   (the Gateway), `$ailuros_upstream`
-   (`ailuros.<namespace>.svc.cluster.local:9002`, the Ailuros Service), and the
+   (the Gateway), `$decision_waf_upstream`
+   (`decision-waf.<namespace>.svc.cluster.local:9002`, the decision-waf Service), and the
    `resolver` address, your cluster DNS Service IP (`10.96.0.10` on kind,
    kubeadm and Talos defaults; check with `kubectl -n kube-system get svc kube-dns`).
    The name is resolved per request, so NGF reloads never depend on DNS; a
@@ -54,13 +55,13 @@ here (`test/repo` checks that they agree with `versions.json`).
    ```yaml
    filters:
      - type: ExtensionRef
-       extensionRef: {group: gateway.nginx.org, kind: SnippetsFilter, name: ailuros-check}
+       extensionRef: {group: gateway.nginx.org, kind: SnippetsFilter, name: decision-waf-check}
    ```
-   A route can also list an `auth_request` filter such as tinyauth's: Ailuros
+   A route can also list an `auth_request` filter such as tinyauth's: decision-waf
    runs first (preaccess phase), then `auth_request`.
 
-Routes without a filter are never sent to Ailuros and carry no
-`X-Ailuros-Request-Id`.
+Routes without a filter are never sent to decision-waf and carry no
+`X-Decision-Waf-Request-Id`.
 
 ## Things to check
 
@@ -77,35 +78,35 @@ Routes without a filter are never sent to Ailuros and carry no
   missing mount, policy removed), `nginx -t` fails, NGF keeps the previous
   configuration and reports it on the Gateway only: `Programmed=False`, reason
   `Invalid`, with the `nginx -t` output. Routes and filters stay green.
-- **Why `ailuros_request_set` is in the policy.** `$ailuros_request_id` exists
-  only once some `ailuros_request_set` declares it, and `add_header` with an
+- **Why `decision_waf_request_set` is in the policy.** `$decision_waf_request_id` exists
+  only once some `decision_waf_request_set` declares it, and `add_header` with an
   unknown variable fails `nginx -t`. The policy declares it at server level
-  (it does nothing where `ailuros_request` is off), so the policy is valid
+  (it does nothing where `decision_waf_request` is off), so the policy is valid
   before any route lists a filter.
-- **`/_ailuros` stays minimal.** It must be `internal` and answer itself: the
+- **`/_decision_waf` stays minimal.** It must be `internal` and answer itself: the
   module refuses answers from non-internal or named locations and from any
   internal redirect inside the subrequest, and `error_page` does not apply
   there, so do not add `rewrite` or `try_files`. The timeouts (1s connect,
-  1500ms read) are Ailuros's default 1s classifier timeout plus 500ms.
-- **`location = /_ailuros` is reserved on every server of the Gateway.** The
+  1500ms read) are decision-waf's default 1s classifier timeout plus 500ms.
+- **`location = /_decision_waf` is reserved on every server of the Gateway.** The
   policy defines it in each server, so a client request for the exact path
-  `/_ailuros` gets 404 (it is `internal`) and an application route on that
-  path is shadowed. Do not use `/_ailuros` for your own routes.
-- **`add_header X-Ailuros-Request-Id` is at server level, once.** A
+  `/_decision_waf` gets 404 (it is `internal`) and an application route on that
+  path is shadowed. Do not use `/_decision_waf` for your own routes.
+- **`add_header X-Decision-Waf-Request-Id` is at server level, once.** A
   location-level `add_header` would drop the server-level headers of every
   route.
 
 - **Upstream cannot spoof the header.** The policy has a server-level
-  `proxy_hide_header X-Ailuros-Request-Id;`, so an upstream app that sends the
+  `proxy_hide_header X-Decision-Waf-Request-Id;`, so an upstream app that sends the
   header is not passed on; only the module-set value is. A location-level
   `proxy_hide_header` or `add_header` (for example from a
   `ResponseHeaderModifier` on a checked route, which NGF renders as a
   location-level `add_header`) replaces the server-level ones: the request-id
   header would be dropped and a spoofed one would no longer be hidden.
 
-## `ailuros_request` at server level
+## `decision_waf_request` at server level
 
-The filters use `ailuros_request` at location level on purpose. If you set it
+The filters use `decision_waf_request` at location level on purpose. If you set it
 at server level instead (all routes of a server checked), `error_page` targets
 that reach the preaccess phase reuse the original decision rather than asking
 again. A per-route `SnippetsFilter` (location context) avoids that, and it is

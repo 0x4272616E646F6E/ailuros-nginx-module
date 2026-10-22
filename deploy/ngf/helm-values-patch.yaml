@@ -21,14 +21,14 @@ nginx:
         - op: add
           path: /spec/template/spec/volumes/-
           value:
-            name: ailuros-module
+            name: decision-waf-module
             configMap:
-              name: ailuros-nginx-module-ngf2.8.0
+              name: decision-waf-nginx-module-ngf2.8.0
         # containers/0 must be the nginx container. Check this on every NGF
         # upgrade (see README.md).
         - op: add
           path: /spec/template/spec/containers/0/volumeMounts/-
           value:
-            name: ailuros-module
-            mountPath: /usr/lib/nginx/modules/ailuros
+            name: decision-waf-module
+            mountPath: /usr/lib/nginx/modules/decision-waf
             readOnly: true

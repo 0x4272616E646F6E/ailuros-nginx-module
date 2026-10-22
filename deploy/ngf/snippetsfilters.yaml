@@ -1,32 +1,32 @@
 # Per-route filters. List one in an HTTPRoute rule:
 #   filters:
 #     - type: ExtensionRef
-#       extensionRef: {group: gateway.nginx.org, kind: SnippetsFilter, name: ailuros-check}
+#       extensionRef: {group: gateway.nginx.org, kind: SnippetsFilter, name: decision-waf-check}
 # They are in the location context on purpose; see README.md before using
-# ailuros_request at server level.
+# decision_waf_request at server level.
 apiVersion: gateway.nginx.org/v1alpha1
 kind: SnippetsFilter
 metadata:
-  name: ailuros-check
+  name: decision-waf-check
   namespace: default
 spec:
   snippets:
     - context: http.server.location
       value: |
-        ailuros_request /_ailuros;
-        ailuros_request_set $ailuros_request_id $upstream_http_x_ailuros_request_id;
+        decision_waf_request /_decision_waf;
+        decision_waf_request_set $decision_waf_request_id $upstream_http_x_decision_waf_request_id;
 ---
-# Fail open: if Ailuros gives no decision (unreachable, timeout, 5xx other
+# Fail open: if decision-waf gives no decision (unreachable, timeout, 5xx other
 # than its own 503), the request continues and a warning is logged.
 apiVersion: gateway.nginx.org/v1alpha1
 kind: SnippetsFilter
 metadata:
-  name: ailuros-check-open
+  name: decision-waf-check-open
   namespace: default
 spec:
   snippets:
     - context: http.server.location
       value: |
-        ailuros_request /_ailuros;
-        ailuros_request_set $ailuros_request_id $upstream_http_x_ailuros_request_id;
-        ailuros_request_unavailable open;
+        decision_waf_request /_decision_waf;
+        decision_waf_request_set $decision_waf_request_id $upstream_http_x_decision_waf_request_id;
+        decision_waf_request_unavailable open;

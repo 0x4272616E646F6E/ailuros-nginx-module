@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# TEST-ONLY image: NGINX and the Ailuros module built with AddressSanitizer
+# TEST-ONLY image: NGINX and the decision-waf module built with AddressSanitizer
 # and UBSan, for the behaviour suite (make test-asan). Built locally, never
 # published, never run in a cluster. NGINX comes from the same SHA-256-verified
 # tarball as build/Dockerfile. The layout mirrors the NGF data plane image so
@@ -83,14 +83,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libasan8 libubsan1 libpcre2-8-0 libssl3t64 zlib1g procps \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -g 1001 nginx && useradd -u 101 -g 1001 -d /var/cache/nginx -s /usr/sbin/nologin nginx \
-    && mkdir -p /var/cache/nginx /var/log/nginx /usr/lib/nginx/modules/ailuros \
+    && mkdir -p /var/cache/nginx /var/log/nginx /usr/lib/nginx/modules/decision-waf \
         /etc/nginx/main-includes /etc/nginx/events-includes /etc/nginx/conf.d \
     && chown nginx:nginx /var/cache/nginx \
     && ln -sf /dev/stdout /var/log/nginx/access.log && ln -sf /dev/stderr /var/log/nginx/error.log
 COPY --from=build /stage/usr/sbin/nginx /usr/sbin/nginx
 COPY --from=build /stage/etc/nginx/mime.types /etc/nginx/mime.types
-COPY --from=build --chmod=0444 /stage/usr/lib/nginx/modules/ngx_http_ailuros_module.so /usr/lib/nginx/modules/ailuros/ngx_http_ailuros_module.so
-RUN chmod 0555 /usr/lib/nginx/modules/ailuros && ln -s /usr/lib/nginx/modules /etc/nginx/modules
+COPY --from=build --chmod=0444 /stage/usr/lib/nginx/modules/ngx_http_decision_waf_module.so /usr/lib/nginx/modules/decision-waf/ngx_http_decision_waf_module.so
+RUN chmod 0555 /usr/lib/nginx/modules/decision-waf && ln -s /usr/lib/nginx/modules /etc/nginx/modules
 # The NGF nginx.conf (2.8.0) without its njs imports and stream block, which
 # the module and the behaviour suite do not touch.
 COPY <<'CONF' /etc/nginx/nginx.conf
@@ -166,12 +166,12 @@ ENTRYPOINT ["nginx", "-g", "daemon off; master_process on;"]
 FROM runtime AS verify
 USER root
 RUN printf '%s\n' \
-        'load_module /usr/lib/nginx/modules/ailuros/ngx_http_ailuros_module.so;' \
+        'load_module /usr/lib/nginx/modules/decision-waf/ngx_http_decision_waf_module.so;' \
         'pid /tmp/nginx.pid;' \
         'events {}' \
         'http { server { listen 8080;' \
-        '    location = /_ailuros { internal; return 200; }' \
-        '    location / { ailuros_request /_ailuros; return 200; } } }' \
+        '    location = /_decision_waf { internal; return 200; }' \
+        '    location / { decision_waf_request /_decision_waf; return 200; } } }' \
         > /tmp/verify.conf
 USER 101:1001
 # nginx -t exits without freeing its cycle pool (core allocations only), so
@@ -179,6 +179,6 @@ USER 101:1001
 RUN ASAN_OPTIONS=detect_leaks=0:detect_odr_violation=0 nginx -t -c /tmp/verify.conf
 
 FROM scratch AS export
-COPY --from=build /stage/usr/lib/nginx/modules/ngx_http_ailuros_module.so /ngx_http_ailuros_module.so
+COPY --from=build /stage/usr/lib/nginx/modules/ngx_http_decision_waf_module.so /ngx_http_decision_waf_module.so
 
 FROM runtime

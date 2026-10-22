@@ -1,11 +1,11 @@
 #!/bin/sh
 # Write the module's ConfigMap to stdout.
 #   scripts/configmap.sh <so> <ngf> <arch> [namespace]
-# The ConfigMap is named ailuros-nginx-module-ngf<ngf> and holds the .so as
-# binaryData key ngx_http_ailuros_module.so. <arch> is recorded in the
-# ailuros.dev/arch label. The module version for the app.kubernetes.io/version
-# label is $AILUROS_VERSION, else taken from a release-named <so>
-# (ngx_http_ailuros_module-<version>-ngf<ngf>-linux-<arch>.so), else "dev".
+# The ConfigMap is named decision-waf-nginx-module-ngf<ngf> and holds the .so as
+# binaryData key ngx_http_decision_waf_module.so. <arch> is recorded in the
+# decision-waf.dev/arch label. The module version for the app.kubernetes.io/version
+# label is $DECISION_WAF_VERSION, else taken from a release-named <so>
+# (ngx_http_decision_waf_module-<version>-ngf<ngf>-linux-<arch>.so), else "dev".
 # Exits non-zero, writing nothing, if the YAML would exceed 1 MiB (the
 # Kubernetes limit on a ConfigMap).
 set -eu
@@ -20,9 +20,9 @@ so=$1 ngf=$2 arch=$3 ns=${4:-}
 case $arch in amd64 | arm64) ;; *) echo "$0: unsupported architecture $arch" >&2; exit 1 ;; esac
 case $ngf in *[!0-9.]* | '') echo "$0: invalid NGF version $ngf" >&2; exit 1 ;; esac
 
-version=${AILUROS_VERSION:-}
+version=${DECISION_WAF_VERSION:-}
 if [ -z "$version" ]; then
-	version=$(basename "$so" | sed -n 's/^ngx_http_ailuros_module-\(.*\)-ngf[0-9.]*-linux-[a-z0-9]*\.so$/\1/p')
+	version=$(basename "$so" | sed -n 's/^ngx_http_decision_waf_module-\(.*\)-ngf[0-9.]*-linux-[a-z0-9]*\.so$/\1/p')
 fi
 version=${version:-dev}
 case $version in *[!A-Za-z0-9._-]* | [!A-Za-z0-9]* | *[!A-Za-z0-9]) echo "$0: $version is not a valid label value" >&2; exit 1 ;; esac
@@ -34,10 +34,10 @@ data=$(base64 <"$so" | tr -d '\n')
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
 {
-	printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: ailuros-nginx-module-ngf%s\n' "$ngf"
+	printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: decision-waf-nginx-module-ngf%s\n' "$ngf"
 	[ -z "$ns" ] || printf '  namespace: %s\n' "$ns"
-	printf '  labels:\n    app.kubernetes.io/name: ailuros-nginx-module\n    app.kubernetes.io/version: %s\n    ailuros.dev/arch: %s\n' "$version" "$arch"
-	printf 'binaryData:\n  ngx_http_ailuros_module.so: %s\n' "$data"
+	printf '  labels:\n    app.kubernetes.io/name: decision-waf-nginx-module\n    app.kubernetes.io/version: %s\n    decision-waf.dev/arch: %s\n' "$version" "$arch"
+	printf 'binaryData:\n  ngx_http_decision_waf_module.so: %s\n' "$data"
 } >"$tmp"
 size=$(wc -c <"$tmp" | tr -d ' ')
 if [ "$size" -gt 1048576 ]; then

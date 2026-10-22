@@ -1,4 +1,4 @@
-# Build the Ailuros NGINX module per NGF release.
+# Build the decision-waf NGINX module per NGF release.
 #   make build  NGF=2.8.0 ARCH=amd64
 #   make verify NGF=2.8.0
 VERSION ?= dev
@@ -9,7 +9,7 @@ ROW = $(shell jq -c --arg ngf '$(NGF)' '.[] | select(.ngf == $$ngf)' versions.js
 NGINX_VERSION = $(shell printf '%s' '$(ROW)' | jq -r .nginx)
 NGINX_SHA256  = $(shell printf '%s' '$(ROW)' | jq -r .nginx_sha256)
 
-OUT_SO = out/ngx_http_ailuros_module-$(VERSION)-ngf$(NGF)-linux-$(ARCH).so
+OUT_SO = out/ngx_http_decision_waf_module-$(VERSION)-ngf$(NGF)-linux-$(ARCH).so
 BUILD_ARGS = --build-arg NGF_VERSION=$(NGF) \
 	--build-arg NGINX_VERSION=$(NGINX_VERSION) \
 	--build-arg NGINX_SHA256=$(NGINX_SHA256)
@@ -32,7 +32,7 @@ check-ngf:
 build: check-ngf
 	docker buildx build --platform linux/$(ARCH) $(BUILD_ARGS) -f build/Dockerfile \
 		--target export --output type=local,dest=out/.stage-$(ARCH) .
-	mv out/.stage-$(ARCH)/ngx_http_ailuros_module.so $(OUT_SO)
+	mv out/.stage-$(ARCH)/ngx_http_decision_waf_module.so $(OUT_SO)
 	rmdir out/.stage-$(ARCH)
 	@echo "wrote $(OUT_SO)"
 
@@ -44,34 +44,34 @@ verify: check-ngf
 # module) under test; unset, the first row is used. An unknown NGF fails.
 test:
 	@if [ -n "$(NGF)" ]; then $(MAKE) --no-print-directory check-ngf NGF=$(NGF); fi
-	cd test && AILUROS_NGF=$(NGF) go test ./... -count=1 -timeout 30m $(TESTFLAGS)
+	cd test && DECISION_WAF_NGF=$(NGF) go test ./... -count=1 -timeout 30m $(TESTFLAGS)
 
 # The behaviour suite against NGINX and the module built with AddressSanitizer
 # and UBSan (build/Dockerfile.asan), for the host's architecture. Local test
 # image only; the .so mounted into it comes from the same ASan build.
-ASAN_IMAGE = ailuros-nginx-asan:local
+ASAN_IMAGE = decision-waf-nginx-asan:local
 test-asan: check-ngf
 	docker buildx build $(BUILD_ARGS_ASAN) -f build/Dockerfile.asan --target verify --progress=plain --output type=cacheonly .
 	docker buildx build $(BUILD_ARGS_ASAN) -f build/Dockerfile.asan --target runtime -t $(ASAN_IMAGE) --load .
 	rm -rf out/.asan && mkdir -p out/.asan
 	docker buildx build $(BUILD_ARGS_ASAN) -f build/Dockerfile.asan --target export --output type=local,dest=out/.asan .
-	cd test && AILUROS_NGF=$(NGF) AILUROS_MODULE_IMAGE=$(ASAN_IMAGE) \
-		AILUROS_MODULE_SO=$(CURDIR)/out/.asan/ngx_http_ailuros_module.so \
+	cd test && DECISION_WAF_NGF=$(NGF) DECISION_WAF_MODULE_IMAGE=$(ASAN_IMAGE) \
+		DECISION_WAF_MODULE_SO=$(CURDIR)/out/.asan/ngx_http_decision_waf_module.so \
 		go test ./behaviour/... -count=1 -timeout 30m $(TESTFLAGS)
 
-# The module against the published Ailuros (pinned by digest in
+# The module against the published decision-waf (pinned by digest in
 # test/contract/contract_test.go) and a stub model. Needs the module built:
-# make build NGF=<ngf> ARCH=<host arch> VERSION=dev, or AILUROS_MODULE_SO.
+# make build NGF=<ngf> ARCH=<host arch> VERSION=dev, or DECISION_WAF_MODULE_SO.
 test-contract: check-ngf
-	cd test && AILUROS_NGF=$(NGF) go test ./contract/... -count=1 -timeout 15m $(TESTFLAGS)
+	cd test && DECISION_WAF_NGF=$(NGF) go test ./contract/... -count=1 -timeout 15m $(TESTFLAGS)
 
 # NGF-in-kind end to end: installs deploy/ngf/ into a real NGF in a throwaway
-# kind cluster (ailuros-module-it, temporary kubeconfig; yours is never used).
+# kind cluster (decision-waf-module-it, temporary kubeconfig; yours is never used).
 # Needs docker, kind, kubectl and helm, network access for the NGF chart and
 # images, and the module built: make build NGF=<ngf> ARCH=<host arch>
-# VERSION=dev, or AILUROS_MODULE_SO.
+# VERSION=dev, or DECISION_WAF_MODULE_SO.
 test-kind: check-ngf
-	cd test && AILUROS_NGF=$(NGF) go test -tags kind ./kind/... -count=1 -timeout 30m -v $(TESTFLAGS)
+	cd test && DECISION_WAF_NGF=$(NGF) go test -tags kind ./kind/... -count=1 -timeout 30m -v $(TESTFLAGS)
 
 # Uses a local cppcheck if there is one, otherwise Alpine's package in a
 # throwaway container of the stock NGF image (NGF, or the first versions.json row).
@@ -111,9 +111,9 @@ release-build:
 	set -e; for ngf in $$(jq -r --arg ngf '$(NGF)' '.[] | select($$ngf == "" or .ngf == $$ngf) | .ngf' versions.json); do \
 		for arch in $(RELEASE_ARCHES); do \
 			$(MAKE) --no-print-directory build NGF=$$ngf ARCH=$$arch VERSION=$(VERSION); \
-			so=ngx_http_ailuros_module-$(VERSION)-ngf$$ngf-linux-$$arch.so; \
+			so=ngx_http_decision_waf_module-$(VERSION)-ngf$$ngf-linux-$$arch.so; \
 			cp out/$$so dist/$$so; \
-			AILUROS_VERSION=$(VERSION) scripts/configmap.sh dist/$$so $$ngf $$arch > dist/ailuros-nginx-module-ngf$$ngf-$$arch.yaml; \
+			DECISION_WAF_VERSION=$(VERSION) scripts/configmap.sh dist/$$so $$ngf $$arch > dist/decision-waf-nginx-module-ngf$$ngf-$$arch.yaml; \
 		done; \
 	done
 

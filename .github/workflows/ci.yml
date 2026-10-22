@@ -70,7 +70,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: module-ngf${{ matrix.ngf }}-${{ matrix.arch }}
-          path: out/ngx_http_ailuros_module-ci-*.so
+          path: out/ngx_http_decision_waf_module-ci-*.so
           retention-days: 7
 
   cppcheck:
@@ -169,7 +169,7 @@ jobs:
         with:
           go-version-file: test/go.mod
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - name: Module against the published Ailuros
+      - name: Module against the published decision-waf
         env:
           NGF: ${{ matrix.ngf }}
         run: |

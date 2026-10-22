@@ -27,4 +27,4 @@ cd "$work/src"
 ./configure --with-compat --add-dynamic-module="$root/module" \
     --with-cc-opt='-Wall -Wextra -Werror'
 make modules
-echo "wrote $work/src/objs/ngx_http_ailuros_module.so"
+echo "wrote $work/src/objs/ngx_http_decision_waf_module.so"

@@ -7,7 +7,7 @@ a minor version may change behavior or configuration; the entry says how.
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-10-21
+## [0.1.0] - 2026-10-22
 
 The first release.
 

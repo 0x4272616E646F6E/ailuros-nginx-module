@@ -17,23 +17,18 @@ import (
 	"github.com/0x4272616E646F6E/decision-waf-nginx-module/test/harness"
 )
 
-// legacyAilurosImage is ghcr.io/0x4272616e646f6e/ailuros:0.1.0, pinned by
-// digest, with the environment it reads and the upstream variable of the
-// request ID header it answers with.
-const (
-	legacyAilurosImage  = "ghcr.io/0x4272616e646f6e/ailuros@sha256:b7540bacf0a1729bba473f728119157cc584f28449aa52b763d5e502f41db273"
-	backendRequestIDVar = "$upstream_http_x_ailuros_request_id"
-)
+// decisionWafImage is ghcr.io/0x4272616e646f6e/decision-waf:0.2.0, pinned by digest.
+const decisionWafImage = "ghcr.io/0x4272616e646f6e/decision-waf@sha256:da85c874cc7ec37bc4517cc503baf567c06b33e5a7bcabe8d10eb091b6e7830d"
 
-func legacyAilurosEnv() map[string]string {
+func decisionWafEnv() map[string]string {
 	return map[string]string{
-		"AILUROS_INSPECTION_MODE":     "lite",
-		"AILUROS_CLASSIFIER_BACKEND":  "openai",
-		"AILUROS_CLASSIFIER_BASE_URL": "http://model:8000/v1",
-		"AILUROS_CLASSIFIER_MODEL":    "stub",
-		"AILUROS_FORWARDAUTH_ADDR":    ":9002",
-		"AILUROS_EXTPROC_ADDR":        "",
-		"AILUROS_EXTAUTHZ_ADDR":       "",
+		"DECISION_WAF_INSPECTION_MODE":     "lite",
+		"DECISION_WAF_CLASSIFIER_BACKEND":  "openai",
+		"DECISION_WAF_CLASSIFIER_BASE_URL": "http://model:8000/v1",
+		"DECISION_WAF_CLASSIFIER_MODEL":    "stub",
+		"DECISION_WAF_FORWARDAUTH_ADDR":    ":9002",
+		"DECISION_WAF_EXTPROC_ADDR":        "",
+		"DECISION_WAF_EXTAUTHZ_ADDR":       "",
 	}
 }
 
@@ -48,7 +43,7 @@ server {
 
     location /closed/ {
         decision_waf_request /_decision_waf;
-        decision_waf_request_set $decision_waf_request_id ` + backendRequestIDVar + `;
+        decision_waf_request_set $decision_waf_request_id $upstream_http_x_decision_waf_request_id;
         add_header X-Status $decision_waf_request_status always;
         add_header X-Decision-Waf-Request-Id $decision_waf_request_id always;
         proxy_pass http://echo:8080/;
@@ -56,7 +51,7 @@ server {
 
     location /open/ {
         decision_waf_request /_decision_waf;
-        decision_waf_request_set $decision_waf_request_id ` + backendRequestIDVar + `;
+        decision_waf_request_set $decision_waf_request_id $upstream_http_x_decision_waf_request_id;
         decision_waf_request_unavailable open;
         add_header X-Status $decision_waf_request_status always;
         add_header X-Decision-Waf-Request-Id $decision_waf_request_id always;
@@ -154,7 +149,7 @@ func get(t *testing.T, s *harness.Stack, path string, headers map[string]string)
 }
 
 func TestRealDecisionWafContract(t *testing.T) {
-	s := harness.Up(t, harness.Config{NGINXConf: conf, RealDecisionWaf: legacyAilurosImage, RealDecisionWafEnv: legacyAilurosEnv()})
+	s := harness.Up(t, harness.Config{NGINXConf: conf, RealDecisionWaf: decisionWafImage, RealDecisionWafEnv: decisionWafEnv()})
 
 	// forged are client headers that would break or fool a proxy that passed
 	// them on: with X-Forwarded-Uri next to X-Original-URI decision-waf answers 500,

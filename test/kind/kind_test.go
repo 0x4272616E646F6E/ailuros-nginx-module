@@ -38,30 +38,24 @@ const (
 	configMapPrefix = "decision-waf-nginx-module-ngf"
 )
 
-// legacyAilurosImage is ghcr.io/0x4272616e646f6e/ailuros:0.1.0, pinned by
-// digest (as in the contract test), with the environment it reads and the
-// upstream variable of the request ID header it answers with, which replaces
-// shippedRequestIDVar in deploy/ngf. The kind node pulls the image.
-const (
-	legacyAilurosImage  = "ghcr.io/0x4272616e646f6e/ailuros@sha256:b7540bacf0a1729bba473f728119157cc584f28449aa52b763d5e502f41db273"
-	backendRequestIDVar = "$upstream_http_x_ailuros_request_id"
-	shippedRequestIDVar = "$upstream_http_x_decision_waf_request_id"
-)
+// decisionWafImage is ghcr.io/0x4272616e646f6e/decision-waf:0.2.0, pinned by
+// digest (as in the contract test). The kind node pulls the image.
+const decisionWafImage = "ghcr.io/0x4272616e646f6e/decision-waf@sha256:da85c874cc7ec37bc4517cc503baf567c06b33e5a7bcabe8d10eb091b6e7830d"
 
-func legacyAilurosEnv() map[string]string {
+func decisionWafEnv() map[string]string {
 	return map[string]string{
-		"AILUROS_INSPECTION_MODE":     "lite",
-		"AILUROS_CLASSIFIER_BACKEND":  "openai",
-		"AILUROS_CLASSIFIER_BASE_URL": "http://model.default.svc.cluster.local:8000/v1",
-		"AILUROS_CLASSIFIER_MODEL":    "stub",
-		"AILUROS_FORWARDAUTH_ADDR":    ":9002",
-		"AILUROS_EXTPROC_ADDR":        "",
-		"AILUROS_EXTAUTHZ_ADDR":       "",
+		"DECISION_WAF_INSPECTION_MODE":     "lite",
+		"DECISION_WAF_CLASSIFIER_BACKEND":  "openai",
+		"DECISION_WAF_CLASSIFIER_BASE_URL": "http://model.default.svc.cluster.local:8000/v1",
+		"DECISION_WAF_CLASSIFIER_MODEL":    "stub",
+		"DECISION_WAF_FORWARDAUTH_ADDR":    ":9002",
+		"DECISION_WAF_EXTPROC_ADDR":        "",
+		"DECISION_WAF_EXTAUTHZ_ADDR":       "",
 	}
 }
 
 func backendEnv() string {
-	env := legacyAilurosEnv()
+	env := decisionWafEnv()
 	keys := make([]string, 0, len(env))
 	for k := range env {
 		keys = append(keys, k)
@@ -72,13 +66,6 @@ func backendEnv() string {
 		fmt.Fprintf(&b, "            - {name: %s, value: %q}\n", k, env[k])
 	}
 	return b.String()
-}
-
-func deployManifests(rendered string) (string, error) {
-	if !strings.Contains(rendered, shippedRequestIDVar) {
-		return "", fmt.Errorf("deploy/ngf has no %s", shippedRequestIDVar)
-	}
-	return strings.ReplaceAll(rendered, shippedRequestIDVar, backendRequestIDVar), nil
 }
 
 var configMapRE = regexp.MustCompile(regexp.QuoteMeta(configMapPrefix) + `(\d+\.\d+\.\d+)`)
@@ -253,11 +240,7 @@ func TestNGF(t *testing.T) {
 	}
 
 	// deploy/ngf as documented (policy and filters), then Gateway and routes.
-	manifests, err := deployManifests(e.kubectl(t, "kustomize", filepath.Join(root, "deploy", "ngf")))
-	if err != nil {
-		t.Fatal(err)
-	}
-	e.kubectlIn(t, manifests, "apply", "-f", "-")
+	e.kubectl(t, "apply", "-k", filepath.Join(root, "deploy", "ngf"))
 	e.kubectlIn(t, gatewayAndRoutes, "apply", "-f", "-")
 	e.kubectl(t, "wait", "--for=condition=Programmed", "gateway/gateway", "--timeout=240s")
 	e.kubectl(t, "rollout", "status", "deploy/gateway-nginx", "--timeout=240s")
@@ -573,7 +556,7 @@ spec:
     spec:
       containers:
         - name: decision-waf
-          image: ` + legacyAilurosImage + `
+          image: ` + decisionWafImage + `
           env:
 ` + backendEnv() + `          ports: [{containerPort: 9002}, {containerPort: 9090}]
           readinessProbe: {httpGet: {path: /readyz, port: 9090}}

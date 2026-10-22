@@ -21,7 +21,7 @@ first row).
 | `make test NGF=2.8.0` | all Go suites: behaviour, contract and repo (below) |
 | `make test-asan NGF=2.8.0` | the behaviour suite against the module and NGINX built with AddressSanitizer and UBSan on Debian |
 | `make test-contract NGF=2.8.0` | the module against the published decision-waf (pinned by digest) and a stub model |
-| `make test-kind NGF=2.8.0` | NGF in a throwaway kind cluster (`decision-waf-module-it`) with `deploy/ngf/` applied unmodified apart from the upstream request ID header variable, which follows the pinned backend image; it uses a temporary kubeconfig and never yours |
+| `make test-kind NGF=2.8.0` | NGF in a throwaway kind cluster (`decision-waf-module-it`) with `deploy/ngf/` applied unmodified; it uses a temporary kubeconfig and never yours |
 | `make cppcheck` | static analysis of `module/src` |
 | `make verify NGF=2.8.0` | compiles with `-Wall -Wextra -Werror` and loads the module with `nginx -t` |
 | `make build-host NGF=2.8.0` | the host-compiler build CodeQL traces |

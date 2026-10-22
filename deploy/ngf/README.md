@@ -1,9 +1,8 @@
 # Installing the module on NGINX Gateway Fabric
 
 Example manifests for NGF 2.8.0, the newest release in `versions.json`
-(a repo test keeps them in step). `make test-kind` applies them unmodified
-apart from the upstream request ID header variable, which follows the backend
-image it pins. The module is a ConfigMap mounted into NGF's stock NGINX
+(a repo test keeps them in step). `make test-kind` applies them unmodified.
+The module is a ConfigMap mounted into NGF's stock NGINX
 image; no custom image is run.
 
 **Another supported NGF release.** The only version-specific parts are the

@@ -136,8 +136,17 @@ CONF
 # That is core NGINX undefined behaviour with no effect, hit by every proxied
 # request. This one check (nonnull-attribute) is suppressed for that one file;
 # everything else in it, and all of the module, stays checked.
+# On x86, NGINX's configure defines NGX_HAVE_NONALIGNED, and core code then
+# reads and writes uint32_t at unaligned addresses on purpose (HTTP/2 and gRPC
+# frame writers in ngx_http_v2.h, method matching in ngx_http_parse.c, MD5).
+# x86 allows it, but UBSan reports it (seen on amd64 runners; arm64 builds take
+# the byte-wise path). Only the alignment check is off, only in those files.
 COPY <<'SUPP' /etc/nginx/ubsan.supp
 nonnull-attribute:src/http/modules/ngx_http_proxy_module.c
+alignment:src/http/v2/
+alignment:src/http/modules/ngx_http_grpc_module.c
+alignment:src/http/ngx_http_parse.c
+alignment:src/core/ngx_md5.c
 SUPP
 # Options as the brief states them. NGINX discards its processes' environment,
 # so the sanitizers may never see these variables in the workers; the same

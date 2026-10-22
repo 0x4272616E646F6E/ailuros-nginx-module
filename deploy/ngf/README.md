@@ -42,8 +42,12 @@ here (`test/repo` checks that they agree with `versions.json`).
    NGF version, so an NGF bump changes the pod template and rolls the pods.
 3. **NGF**, with `helm-values-patch.yaml` merged into your values.
 4. **Edit `snippetspolicy.yaml`**: `metadata.namespace` and `targetRefs[0].name`
-   (the Gateway), and the `proxy_pass` host `ailuros.<namespace>.svc.cluster.local`
-   (the Ailuros Service). Edit the namespace in `snippetsfilters.yaml` to match
+   (the Gateway), `$ailuros_upstream`
+   (`ailuros.<namespace>.svc.cluster.local:9002`, the Ailuros Service), and the
+   `resolver` address, your cluster DNS Service IP (`10.96.0.10` on kind,
+   kubeadm and Talos defaults; check with `kubectl -n kube-system get svc kube-dns`).
+   The name is resolved per request, so NGF reloads never depend on DNS; a
+   wrong resolver or name makes every check "no decision" (closed: 503). Edit the namespace in `snippetsfilters.yaml` to match
    the routes' namespace (SnippetsFilters are referenced from the route's own
    namespace). Then `kubectl apply -k deploy/ngf`.
 5. **List a filter on each route** that should be checked:

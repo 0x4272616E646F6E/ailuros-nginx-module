@@ -53,7 +53,8 @@ server {
 // shippedLocation returns the `location = /_ailuros { ... }` block of
 // deploy/ngf/snippetspolicy.yaml, byte for byte (the `value: |` indentation
 // replaced by the test config's), except that the Service host
-// ailuros.default.svc.cluster.local becomes the compose service "ailuros".
+// ailuros.default.svc.cluster.local becomes the compose service "ailuros" and
+// the cluster DNS resolver becomes Docker's embedded DNS.
 func shippedLocation() string {
 	data, err := os.ReadFile("../../deploy/ngf/snippetspolicy.yaml")
 	if err != nil {
@@ -75,10 +76,12 @@ func shippedLocation() string {
 		}
 	}
 	loc := strings.Join(out, "\n")
-	if !in || !strings.HasSuffix(loc, "    }") || !strings.Contains(loc, "proxy_pass http://ailuros.default.svc.cluster.local:9002/;") {
+	if !in || !strings.HasSuffix(loc, "    }") || !strings.Contains(loc, "set $ailuros_upstream ailuros.default.svc.cluster.local:9002;") ||
+		!strings.Contains(loc, "resolver 10.96.0.10 ") {
 		panic("deploy/ngf/snippetspolicy.yaml: /_ailuros location not found in the expected form")
 	}
-	return strings.Replace(loc, "ailuros.default.svc.cluster.local", "ailuros", 1)
+	loc = strings.Replace(loc, "ailuros.default.svc.cluster.local", "ailuros", 1)
+	return strings.Replace(loc, "resolver 10.96.0.10 ", "resolver 127.0.0.11 ", 1)
 }
 
 var requestID = regexp.MustCompile(`^[0-9a-f]{16}$`)

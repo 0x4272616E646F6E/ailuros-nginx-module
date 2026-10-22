@@ -569,7 +569,9 @@ spec:
       value: |
         location = /_tinyauth {
             internal;
-            proxy_pass http://tinyauth.default.svc.cluster.local:3000/;
+            resolver 10.96.0.10 valid=10s ipv6=off;
+            set $tinyauth_upstream tinyauth.default.svc.cluster.local:3000;
+            proxy_pass http://$tinyauth_upstream/;
             proxy_pass_request_body off;
             proxy_set_header Content-Length "";
         }

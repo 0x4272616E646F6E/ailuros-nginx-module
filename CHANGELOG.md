@@ -33,7 +33,8 @@ The first release.
   `SnippetsPolicy` and per-route `SnippetsFilter`s (fail closed and fail
   open), with an `X-Ailuros-Request-Id` response header that upstreams cannot
   spoof. Its `/_ailuros` location sets the host and client IP headers Ailuros
-  trusts from the real request, so clients cannot forge them.
+  trusts from the real request, so clients cannot forge them, and resolves the
+  Ailuros Service per request, so NGF reloads never depend on DNS.
 - CI (build, cppcheck, behaviour, AddressSanitizer and Ailuros contract
   suites), an NGF-in-kind end-to-end test, CodeQL, Scorecard, and a weekly
   watch for new NGF releases.

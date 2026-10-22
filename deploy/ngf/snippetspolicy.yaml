@@ -3,8 +3,10 @@
 #
 # Set before applying:
 #   metadata.namespace / targetRefs.name   the Gateway's namespace and name
-#   proxy_pass                             ailuros.<namespace>.svc.cluster.local
+#   $ailuros_upstream                      ailuros.<namespace>.svc.cluster.local:9002
 #                                          (the Ailuros Service, forward-auth port 9002)
+#   resolver                               the cluster DNS Service IP
+#                                          (kubectl -n kube-system get svc kube-dns)
 apiVersion: gateway.nginx.org/v1alpha1
 kind: SnippetsPolicy
 metadata:
@@ -28,7 +30,17 @@ spec:
         # rewrite or try_files.
         location = /_ailuros {
             internal;
-            proxy_pass http://ailuros.default.svc.cluster.local:9002/;
+            # Resolved per request, so an NGF reload never depends on DNS
+            # (a name in proxy_pass is looked up when the config is tested,
+            # and a failed lookup there leaves the Gateway unprogrammed). A
+            # failed lookup here is a 502, which the module treats as no
+            # decision. 10.96.0.10 is the usual kube-dns Service IP (kind,
+            # kubeadm, Talos). NGINX's resolver ignores search domains, so the
+            # name must be fully qualified.
+            resolver 10.96.0.10 valid=10s ipv6=off;
+            resolver_timeout 1s;
+            set $ailuros_upstream ailuros.default.svc.cluster.local:9002;
+            proxy_pass http://$ailuros_upstream/;
             proxy_pass_request_body off;
             proxy_cache off;
             proxy_set_header Content-Length "";

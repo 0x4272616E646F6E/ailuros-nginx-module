@@ -1,11 +1,11 @@
 // Package harness runs the behaviour suite's Docker Compose stack: the stock
 // NGINX Gateway Fabric data plane image with the module mounted read-only at
 // the production path and loaded from main-includes, running as uid 101, plus
-// stubs for Ailuros (ailuros:9002), tinyauth (tinyauth:3000) and an echo
+// stubs for decision-waf (decision-waf:9002), tinyauth (tinyauth:3000) and an echo
 // upstream (echo:8080). Every stub records the requests it receives.
 //
-// The module is taken from $AILUROS_MODULE_SO, or else from
-// out/ngx_http_ailuros_module-dev-ngf<ngf>-linux-<arch>.so for the first NGF
+// The module is taken from $DECISION_WAF_MODULE_SO, or else from
+// out/ngx_http_decision_waf_module-dev-ngf<ngf>-linux-<arch>.so for the first NGF
 // version in versions.json and the Docker host's architecture (build it with
 // make build NGF=<ngf> ARCH=<arch>).
 package harness
@@ -31,18 +31,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/0x4272616E646F6E/ailuros-nginx-module/test/repo"
+	"github.com/0x4272616E646F6E/decision-waf-nginx-module/test/repo"
 )
 
 // ModulePath is where NGF mounts the module, and where the stack mounts it.
-const ModulePath = "/usr/lib/nginx/modules/ailuros/ngx_http_ailuros_module.so"
+const ModulePath = "/usr/lib/nginx/modules/decision-waf/ngx_http_decision_waf_module.so"
 
-const stubImage = "ailuros-mod-it-stub:local"
+const stubImage = "decision-waf-mod-it-stub:local"
 
 // Config describes one stack.
 type Config struct {
@@ -51,13 +52,15 @@ type Config struct {
 	NGINXConf string
 	// ModuleImage replaces the stock NGF image (e.g. a sanitizer build).
 	ModuleImage string
-	// RealAiluros, if set, is an Ailuros image reference (pinned by digest)
-	// that replaces the Ailuros stub, together with a stub model service
-	// (model:8000). Ailuros is configured as the contract test needs it:
-	// lite inspection, the OpenAI backend on the stub model, forward-auth on
-	// 9002, ext_proc and ext_authz off. Stack.AilurosCalls and
-	// SetAilurosAnswer are then unavailable; use AilurosLog and StopAiluros.
-	RealAiluros string
+	// RealDecisionWaf, if set, is a decision-waf image reference (pinned by digest)
+	// that replaces the decision-waf stub, together with a stub model service
+	// (model:8000). RealDecisionWafEnv is its environment, which the caller
+	// sets as the contract test needs it: lite inspection, the OpenAI backend
+	// on the stub model, forward-auth on 9002, ext_proc and ext_authz off.
+	// Stack.DecisionWafCalls and SetDecisionWafAnswer are then unavailable;
+	// use DecisionWafLog and StopDecisionWaf.
+	RealDecisionWaf    string
+	RealDecisionWafEnv map[string]string
 }
 
 // Call is one request a stub received.
@@ -74,10 +77,10 @@ type Stack struct {
 	file    string
 	conf    string // host path of the http-level config NGINX includes
 	base    string // http://127.0.0.1:<port> of NGINX's 8080
-	admin   string // http://127.0.0.1:<port> of the real Ailuros's 9090
+	admin   string // http://127.0.0.1:<port> of the real decision-waf's 9090
 	tlsAddr string // 127.0.0.1:<port> of NGINX's 8443
 	control map[string]string
-	real    bool // the real Ailuros replaces the stub
+	real    bool // the real decision-waf replaces the stub
 	client  *http.Client
 }
 
@@ -98,12 +101,12 @@ func Up(t *testing.T, cfg Config) *Stack {
 
 	dir := confDir(t, cfg.NGINXConf)
 	services := fmt.Sprintf(stubServices, stubImage, stubImage, stubImage)
-	dependsOn := "[ailuros, tinyauth, echo]"
-	if cfg.RealAiluros != "" {
-		services = fmt.Sprintf(realServices, cfg.RealAiluros, stubImage, stubImage, stubImage)
+	dependsOn := "[decision-waf, tinyauth, echo]"
+	if cfg.RealDecisionWaf != "" {
+		services = fmt.Sprintf(realServices, cfg.RealDecisionWaf, composeEnv(cfg.RealDecisionWafEnv), stubImage, stubImage, stubImage)
 	}
 	compose := fmt.Sprintf(composeTemplate, image, so, ModulePath,
-		filepath.Join(dir, "ailuros.conf"), filepath.Join(dir, "harness.conf"),
+		filepath.Join(dir, "decision-waf.conf"), filepath.Join(dir, "harness.conf"),
 		filepath.Join(dir, "default.conf"), filepath.Join(dir, "tls"), dependsOn) + services
 	file := filepath.Join(dir, "compose.yaml")
 	if err := os.WriteFile(file, []byte(compose), 0o644); err != nil {
@@ -111,11 +114,11 @@ func Up(t *testing.T, cfg Config) *Stack {
 	}
 
 	s := &Stack{
-		project: "ailuros-mod-it-" + randomHex(t),
+		project: "decision-waf-mod-it-" + randomHex(t),
 		file:    file,
 		conf:    filepath.Join(dir, "default.conf"),
 		control: map[string]string{},
-		real:    cfg.RealAiluros != "",
+		real:    cfg.RealDecisionWaf != "",
 		client: &http.Client{
 			Timeout:       20 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -146,10 +149,10 @@ func Up(t *testing.T, cfg Config) *Stack {
 
 	s.base = "http://" + s.port(t, "nginx", "8080")
 	s.tlsAddr = s.port(t, "nginx", "8443")
-	svcs := []string{"ailuros", "tinyauth", "echo"}
+	svcs := []string{"decision-waf", "tinyauth", "echo"}
 	if s.real {
 		svcs = []string{"model", "tinyauth", "echo"}
-		s.admin = "http://" + s.port(t, "ailuros", "9090")
+		s.admin = "http://" + s.port(t, "decision-waf", "9090")
 	}
 	for _, svc := range svcs {
 		s.control[svc] = "http://" + s.port(t, svc, "9999")
@@ -176,14 +179,14 @@ func sanitizerReport(log string) string {
 	return ""
 }
 
-// moduleImage is the NGINX image: cfg.ModuleImage, else $AILUROS_MODULE_IMAGE
+// moduleImage is the NGINX image: cfg.ModuleImage, else $DECISION_WAF_MODULE_IMAGE
 // (set by make test-asan), else the stock NGF image.
 func moduleImage(t *testing.T, cfg Config) string {
 	t.Helper()
 	if cfg.ModuleImage != "" {
 		return cfg.ModuleImage
 	}
-	if v := os.Getenv("AILUROS_MODULE_IMAGE"); v != "" {
+	if v := os.Getenv("DECISION_WAF_MODULE_IMAGE"); v != "" {
 		return v
 	}
 	return StockImage(t)
@@ -192,19 +195,19 @@ func moduleImage(t *testing.T, cfg Config) string {
 // ModuleSO returns the absolute path of the module the stack mounts.
 func ModuleSO(t *testing.T) string {
 	t.Helper()
-	if p := os.Getenv("AILUROS_MODULE_SO"); p != "" {
+	if p := os.Getenv("DECISION_WAF_MODULE_SO"); p != "" {
 		abs, err := filepath.Abs(p)
 		if err != nil {
-			t.Fatalf("AILUROS_MODULE_SO: %v", err)
+			t.Fatalf("DECISION_WAF_MODULE_SO: %v", err)
 		}
 		return abs
 	}
 	ngf := NGFVersion(t)
 	arch := dockerArch(t)
 	p := filepath.Join(RepoRoot(t), "out",
-		fmt.Sprintf("ngx_http_ailuros_module-dev-ngf%s-linux-%s.so", ngf, arch))
+		fmt.Sprintf("ngx_http_decision_waf_module-dev-ngf%s-linux-%s.so", ngf, arch))
 	if _, err := os.Stat(p); err != nil {
-		t.Fatalf("module not built: %v (run make build NGF=%s ARCH=%s, or set AILUROS_MODULE_SO)", err, ngf, arch)
+		t.Fatalf("module not built: %v (run make build NGF=%s ARCH=%s, or set DECISION_WAF_MODULE_SO)", err, ngf, arch)
 	}
 	return p
 }
@@ -222,10 +225,10 @@ func StockModuleImage(t *testing.T) bool {
 	return moduleImage(t, Config{}) == StockImage(t)
 }
 
-// NGFVersion is $AILUROS_NGF, or the first version in versions.json.
+// NGFVersion is $DECISION_WAF_NGF, or the first version in versions.json.
 func NGFVersion(t *testing.T) string {
 	t.Helper()
-	if v := os.Getenv("AILUROS_NGF"); v != "" {
+	if v := os.Getenv("DECISION_WAF_NGF"); v != "" {
 		return v
 	}
 	versions, err := repo.LoadVersions(filepath.Join(RepoRoot(t), "versions.json"))
@@ -267,7 +270,7 @@ func CheckConfig(t *testing.T, conf string) (ok bool, output string) {
 	args := []string{"run", "--rm", "--user", "101:1001", "--entrypoint", "nginx",
 		"--tmpfs", "/var/run/nginx:mode=1777",
 		"-v", so + ":" + ModulePath + ":ro",
-		"-v", filepath.Join(dir, "ailuros.conf") + ":/etc/nginx/main-includes/ailuros.conf:ro",
+		"-v", filepath.Join(dir, "decision-waf.conf") + ":/etc/nginx/main-includes/decision-waf.conf:ro",
 		"-v", filepath.Join(dir, "harness.conf") + ":/etc/nginx/main-includes/harness.conf:ro",
 		"-v", filepath.Join(dir, "default.conf") + ":/etc/nginx/conf.d/default.conf:ro",
 		"-v", filepath.Join(dir, "tls") + ":/etc/nginx/test-tls:ro",
@@ -286,18 +289,18 @@ func CheckConfig(t *testing.T, conf string) (ok bool, output string) {
 	return err == nil, out
 }
 
-// SetAilurosRoutes makes the Ailuros stub answer with the status of the
+// SetDecisionWafRoutes makes the decision-waf stub answer with the status of the
 // route with the longest key that is a prefix of the request's X-Original-URI, instead of the
 // default answer's status.
-func (s *Stack) SetAilurosRoutes(status int, routes map[string]int) {
+func (s *Stack) SetDecisionWafRoutes(status int, routes map[string]int) {
 	body, _ := json.Marshal(map[string]any{"status": status, "routes": routes})
-	resp, err := s.client.Post(s.control["ailuros"]+"/answer", "application/json", bytes.NewReader(body))
+	resp, err := s.client.Post(s.control["decision-waf"]+"/answer", "application/json", bytes.NewReader(body))
 	if err != nil {
-		panic(fmt.Sprintf("set ailuros routes: %v", err))
+		panic(fmt.Sprintf("set decision-waf routes: %v", err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
-		panic(fmt.Sprintf("set ailuros routes: status %d", resp.StatusCode))
+		panic(fmt.Sprintf("set decision-waf routes: status %d", resp.StatusCode))
 	}
 }
 
@@ -331,47 +334,47 @@ func (s *Stack) TLSClient() *http.Client {
 	}
 }
 
-// SetAilurosAnswer makes the Ailuros stub answer every request with status,
+// SetDecisionWafAnswer makes the decision-waf stub answer every request with status,
 // after delay, with headers.
-func (s *Stack) SetAilurosAnswer(status int, delay time.Duration, headers map[string]string) {
+func (s *Stack) SetDecisionWafAnswer(status int, delay time.Duration, headers map[string]string) {
 	body, _ := json.Marshal(map[string]any{
 		"status": status, "delay_ms": delay.Milliseconds(), "headers": headers,
 	})
-	resp, err := s.client.Post(s.control["ailuros"]+"/answer", "application/json", bytes.NewReader(body))
+	resp, err := s.client.Post(s.control["decision-waf"]+"/answer", "application/json", bytes.NewReader(body))
 	if err != nil {
-		panic(fmt.Sprintf("set ailuros answer: %v", err))
+		panic(fmt.Sprintf("set decision-waf answer: %v", err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
-		panic(fmt.Sprintf("set ailuros answer: status %d", resp.StatusCode))
+		panic(fmt.Sprintf("set decision-waf answer: status %d", resp.StatusCode))
 	}
 }
 
-// StopAiluros makes the Ailuros stub stop listening on 9002, so NGINX's
+// StopDecisionWaf makes the decision-waf stub stop listening on 9002, so NGINX's
 // connections to it are refused (the container keeps its address, so this is
 // a refusal rather than an unreachable host). Its calls stay readable.
-func (s *Stack) StopAiluros() {
+func (s *Stack) StopDecisionWaf() {
 	if s.real {
-		if out, err := s.compose("stop", "--timeout", "10", "ailuros"); err != nil {
-			panic(fmt.Sprintf("stop ailuros: %v\n%s", err, out))
+		if out, err := s.compose("stop", "--timeout", "10", "decision-waf"); err != nil {
+			panic(fmt.Sprintf("stop decision-waf: %v\n%s", err, out))
 		}
 		return
 	}
-	resp, err := s.client.Post(s.control["ailuros"]+"/stop", "", nil)
+	resp, err := s.client.Post(s.control["decision-waf"]+"/stop", "", nil)
 	if err != nil {
-		panic(fmt.Sprintf("stop ailuros: %v", err))
+		panic(fmt.Sprintf("stop decision-waf: %v", err))
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
-		panic(fmt.Sprintf("stop ailuros: status %d", resp.StatusCode))
+		panic(fmt.Sprintf("stop decision-waf: status %d", resp.StatusCode))
 	}
 }
 
-// AilurosCalls, TinyauthCalls and EchoCalls return the requests each stub
+// DecisionWafCalls, TinyauthCalls and EchoCalls return the requests each stub
 // received so far.
-func (s *Stack) AilurosCalls() []Call  { return s.calls("ailuros") }
-func (s *Stack) TinyauthCalls() []Call { return s.calls("tinyauth") }
-func (s *Stack) EchoCalls() []Call     { return s.calls("echo") }
+func (s *Stack) DecisionWafCalls() []Call { return s.calls("decision-waf") }
+func (s *Stack) TinyauthCalls() []Call    { return s.calls("tinyauth") }
+func (s *Stack) EchoCalls() []Call        { return s.calls("echo") }
 
 func (s *Stack) calls(svc string) []Call {
 	resp, err := s.client.Get(s.control[svc] + "/calls")
@@ -452,17 +455,17 @@ func (s *Stack) nginxLogs() (string, error) {
 		"logs", "--no-color", "--no-log-prefix", "nginx")
 }
 
-// ModelCalls returns the requests the stub model received (real Ailuros only).
+// ModelCalls returns the requests the stub model received (real decision-waf only).
 func (s *Stack) ModelCalls() []Call { return s.calls("model") }
 
-// AilurosLog returns the real Ailuros's stdout/stderr so far, which holds its
+// DecisionWafLog returns the real decision-waf's stdout/stderr so far, which holds its
 // JSON decision log. It fails the test if the log cannot be read.
-func (s *Stack) AilurosLog(t *testing.T) string {
+func (s *Stack) DecisionWafLog(t *testing.T) string {
 	t.Helper()
 	out, err := run(30*time.Second, "docker", "compose", "-p", s.project, "-f", s.file,
-		"logs", "--no-color", "--no-log-prefix", "ailuros")
+		"logs", "--no-color", "--no-log-prefix", "decision-waf")
 	if err != nil {
-		t.Fatalf("read ailuros log: %v\n%s", err, out)
+		t.Fatalf("read decision-waf log: %v\n%s", err, out)
 	}
 	return out
 }
@@ -499,14 +502,14 @@ func (s *Stack) waitReady(t *testing.T) {
 		urls = append(urls, c+"/ready")
 	}
 	if s.real {
-		// Ailuros is ready once its startup probe of the model has passed.
+		// decision-waf is ready once its startup probe of the model has passed.
 		urls = append(urls, s.admin+"/readyz")
 	}
 	for _, u := range urls {
 		for {
 			resp, err := s.client.Get(u)
 			if err == nil {
-				// Any answer shows NGINX and the stubs are up; only Ailuros's
+				// Any answer shows NGINX and the stubs are up; only decision-waf's
 				// readiness endpoint has to say yes.
 				ok := u != s.admin+"/readyz" || resp.StatusCode == http.StatusOK
 				resp.Body.Close()
@@ -535,7 +538,7 @@ func confDir(t *testing.T, conf string) string {
 	}
 	writeTestCert(t, filepath.Join(dir, "tls"))
 	files := map[string]string{
-		"ailuros.conf": "load_module " + ModulePath + ";\n",
+		"decision-waf.conf": "load_module " + ModulePath + ";\n",
 		// NGF raises the error log level the same way; warnings must be seen.
 		"harness.conf": "error_log stderr info;\n",
 		"default.conf": conf,
@@ -605,7 +608,7 @@ func requireDocker(t *testing.T) {
 	}
 }
 
-// BuildStubImage builds the stub image (Ailuros, tinyauth, echo, model roles)
+// BuildStubImage builds the stub image (decision-waf, tinyauth, echo, model roles)
 // once per test run and returns its local tag.
 func BuildStubImage(t *testing.T) string {
 	t.Helper()
@@ -643,6 +646,19 @@ func randomHex(t *testing.T) string {
 	return hex.EncodeToString(b)
 }
 
+func composeEnv(env map[string]string) string {
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		fmt.Fprintf(&b, "      %s: %q\n", k, env[k])
+	}
+	return b.String()
+}
+
 func run(timeout time.Duration, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -666,7 +682,7 @@ const composeTemplate = `services:
         read_only: true
       - type: bind
         source: %s
-        target: /etc/nginx/main-includes/ailuros.conf
+        target: /etc/nginx/main-includes/decision-waf.conf
         read_only: true
       - type: bind
         source: %s
@@ -686,10 +702,10 @@ const composeTemplate = `services:
     depends_on: %s
 `
 
-// The Ailuros stub, tinyauth and echo.
-const stubServices = `  ailuros:
+// The decision-waf stub, tinyauth and echo.
+const stubServices = `  decision-waf:
     image: %s
-    command: ["-role", "ailuros", "-listen", ":9002"]
+    command: ["-role", "decision-waf", "-listen", ":9002"]
     ports:
       - "127.0.0.1::9999"
   tinyauth:
@@ -704,19 +720,12 @@ const stubServices = `  ailuros:
       - "127.0.0.1::9999"
 `
 
-// The real Ailuros (forward-auth :9002, admin :9090) classifying through the
+// The real decision-waf (forward-auth :9002, admin :9090) classifying through the
 // stub model (model:8000), then tinyauth and echo stubs.
-const realServices = `  ailuros:
+const realServices = `  decision-waf:
     image: %s
     environment:
-      AILUROS_INSPECTION_MODE: lite
-      AILUROS_CLASSIFIER_BACKEND: openai
-      AILUROS_CLASSIFIER_BASE_URL: http://model:8000/v1
-      AILUROS_CLASSIFIER_MODEL: stub
-      AILUROS_FORWARDAUTH_ADDR: ":9002"
-      AILUROS_EXTPROC_ADDR: ""
-      AILUROS_EXTAUTHZ_ADDR: ""
-    ports:
+%s    ports:
       - "127.0.0.1::9090"
     depends_on: [model]
   model:

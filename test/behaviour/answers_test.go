@@ -7,19 +7,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/0x4272616E646F6E/ailuros-nginx-module/test/harness"
+	"github.com/0x4272616E646F6E/decision-waf-nginx-module/test/harness"
 )
 
-// answersConf protects /closed/ and /open/ (both modes) with the Ailuros
+// answersConf protects /closed/ and /open/ (both modes) with the decision-waf
 // stub, and /missing-closed/ and /missing-open/ with a location that does not
 // exist. There is no catch-all location, so /_missing is a 404.
 const answersConf = `
 server {
     listen 8080;
 
-    location = /_ailuros {
+    location = /_decision_waf {
         internal;
-        proxy_pass http://ailuros:9002;
+        proxy_pass http://decision-waf:9002;
         proxy_pass_request_body off;
         proxy_cache off;
         proxy_set_header Content-Length "";
@@ -30,32 +30,32 @@ server {
     }
 
     location /closed/ {
-        ailuros_request /_ailuros;
-        ailuros_request_set $ailuros_request_id $upstream_http_x_ailuros_request_id;
-        add_header X-Status $ailuros_request_status always;
-        add_header X-Ailuros-Request-Id $ailuros_request_id always;
+        decision_waf_request /_decision_waf;
+        decision_waf_request_set $decision_waf_request_id $upstream_http_x_decision_waf_request_id;
+        add_header X-Status $decision_waf_request_status always;
+        add_header X-Decision-Waf-Request-Id $decision_waf_request_id always;
         proxy_pass http://echo:8080;
     }
 
     location /open/ {
-        ailuros_request /_ailuros;
-        ailuros_request_set $ailuros_request_id $upstream_http_x_ailuros_request_id;
-        ailuros_request_unavailable open;
-        add_header X-Status $ailuros_request_status always;
-        add_header X-Ailuros-Request-Id $ailuros_request_id always;
+        decision_waf_request /_decision_waf;
+        decision_waf_request_set $decision_waf_request_id $upstream_http_x_decision_waf_request_id;
+        decision_waf_request_unavailable open;
+        add_header X-Status $decision_waf_request_status always;
+        add_header X-Decision-Waf-Request-Id $decision_waf_request_id always;
         proxy_pass http://echo:8080;
     }
 
     location /missing-closed/ {
-        ailuros_request /_missing;
-        add_header X-Status $ailuros_request_status always;
+        decision_waf_request /_missing;
+        add_header X-Status $decision_waf_request_status always;
         proxy_pass http://echo:8080;
     }
 
     location /missing-open/ {
-        ailuros_request /_missing;
-        ailuros_request_unavailable open;
-        add_header X-Status $ailuros_request_status always;
+        decision_waf_request /_missing;
+        decision_waf_request_unavailable open;
+        add_header X-Status $decision_waf_request_status always;
         proxy_pass http://echo:8080;
     }
 }
@@ -71,15 +71,15 @@ const (
 )
 
 type answerCase struct {
-	name          string
-	cond          condition
-	ailurosStatus int // for answer
-	open          bool
-	wantClient    int
-	wantUpstream  bool
-	wantWarn      bool
-	wantSubStatus string // $ailuros_request_status
-	wantLogged    string // a substring the error log must gain, if any
+	name              string
+	cond              condition
+	decisionWafStatus int // for answer
+	open              bool
+	wantClient        int
+	wantUpstream      bool
+	wantWarn          bool
+	wantSubStatus     string // $decision_waf_request_status
+	wantLogged        string // a substring the error log must gain, if any
 }
 
 func answerCases() []answerCase {
@@ -91,7 +91,7 @@ func answerCases() []answerCase {
 		}
 		row := func(name string, cond condition, status, client int, upstream, warn bool, sub string) {
 			cases = append(cases, answerCase{
-				name: mode + "/" + name, cond: cond, ailurosStatus: status, open: open,
+				name: mode + "/" + name, cond: cond, decisionWafStatus: status, open: open,
 				wantClient: client, wantUpstream: upstream, wantWarn: warn, wantSubStatus: sub,
 			})
 		}
@@ -118,10 +118,10 @@ func answerCases() []answerCase {
 		}
 	}
 	for _, open := range []bool{false, true} {
-		c := answerCase{name: "closed/ailuros stopped", cond: stopped, open: open,
+		c := answerCase{name: "closed/decision-waf stopped", cond: stopped, open: open,
 			wantClient: 503, wantSubStatus: "502"}
 		if open {
-			c = answerCase{name: "open/ailuros stopped", cond: stopped, open: open,
+			c = answerCase{name: "open/decision-waf stopped", cond: stopped, open: open,
 				wantClient: 200, wantUpstream: true, wantWarn: true, wantSubStatus: "502"}
 		}
 		cases = append(cases, c)
@@ -144,17 +144,17 @@ func TestAnswerMapping(t *testing.T) {
 			reachable := true
 			switch tc.cond {
 			case answer:
-				stack.SetAilurosAnswer(tc.ailurosStatus, 0,
-					map[string]string{"X-Ailuros-Request-Id": requestID})
+				stack.SetDecisionWafAnswer(tc.decisionWafStatus, 0,
+					map[string]string{"X-Decision-Waf-Request-Id": requestID})
 			case delayed:
-				stack.SetAilurosAnswer(200, 3*time.Second,
-					map[string]string{"X-Ailuros-Request-Id": requestID})
+				stack.SetDecisionWafAnswer(200, 3*time.Second,
+					map[string]string{"X-Decision-Waf-Request-Id": requestID})
 				reachable = false
 			case missingLocation:
 				prefix = strings.Replace(prefix, "/", "/missing-", 1)
 				reachable = false
 			case stopped:
-				stack.StopAiluros()
+				stack.StopDecisionWaf()
 				reachable = false
 			}
 
@@ -168,15 +168,15 @@ func TestAnswerMapping(t *testing.T) {
 				t.Errorf("client status = %d, want %d", resp.StatusCode, tc.wantClient)
 			}
 			if got := resp.Header.Get("X-Status"); got != tc.wantSubStatus {
-				t.Errorf("$ailuros_request_status = %q, want %q", got, tc.wantSubStatus)
+				t.Errorf("$decision_waf_request_status = %q, want %q", got, tc.wantSubStatus)
 			}
 			if tc.cond == answer {
-				if got := resp.Header.Get("X-Ailuros-Request-Id"); got != requestID {
-					t.Errorf("X-Ailuros-Request-Id = %q, want %q", got, requestID)
+				if got := resp.Header.Get("X-Decision-Waf-Request-Id"); got != requestID {
+					t.Errorf("X-Decision-Waf-Request-Id = %q, want %q", got, requestID)
 				}
 			} else if !reachable && tc.cond != delayed {
-				if got := resp.Header.Get("X-Ailuros-Request-Id"); got != "" {
-					t.Errorf("X-Ailuros-Request-Id = %q, want none", got)
+				if got := resp.Header.Get("X-Decision-Waf-Request-Id"); got != "" {
+					t.Errorf("X-Decision-Waf-Request-Id = %q, want none", got)
 				}
 			}
 
@@ -193,11 +193,11 @@ func TestAnswerMapping(t *testing.T) {
 			// closed and no decision: an error naming the directive
 			wantErr := !tc.open && tc.wantClient == 503 && tc.wantSubStatus != "503"
 			newLog := waitLog(stack, logBefore, tc.wantWarn || wantErr)
-			warned := hasLine(newLog, "[warn]", "ailuros_request")
+			warned := hasLine(newLog, "[warn]", "decision_waf_request")
 			if warned != tc.wantWarn {
 				t.Errorf("fail-open warning logged = %v, want %v; new log:\n%s", warned, tc.wantWarn, newLog)
 			}
-			if wantErr && !hasLine(newLog, "[error]", "ailuros_request") {
+			if wantErr && !hasLine(newLog, "[error]", "decision_waf_request") {
 				t.Errorf("no-decision error not logged; new log:\n%s", newLog)
 			}
 			if tc.wantLogged != "" && !hasLine(newLog, "[error]", tc.wantLogged) {
@@ -214,7 +214,7 @@ func waitLog(stack *harness.Stack, before string, want bool) string {
 	for {
 		now := stack.ErrorLog()
 		gained := strings.TrimPrefix(now, before)
-		if !want || hasLine(gained, "ailuros_request") || time.Now().After(deadline) {
+		if !want || hasLine(gained, "decision_waf_request") || time.Now().After(deadline) {
 			if !want {
 				// give a stray line the same chance to show up
 				time.Sleep(300 * time.Millisecond)
@@ -244,18 +244,18 @@ func hasLine(log string, subs ...string) bool {
 
 func testConfigErrors(t *testing.T) {
 	const valid = `
-ailuros_request off;
-ailuros_request_unavailable closed;
+decision_waf_request off;
+decision_waf_request_unavailable closed;
 server {
     listen 8080;
-    ailuros_request /_ailuros;
-    ailuros_request_unavailable open;
-    location = /_ailuros { internal; return 200; }
+    decision_waf_request /_decision_waf;
+    decision_waf_request_unavailable open;
+    location = /_decision_waf { internal; return 200; }
     location / {
-        ailuros_request_set $ailuros_request_id $ailuros_request_status;
+        decision_waf_request_set $decision_waf_request_id $decision_waf_request_status;
         return 200;
     }
-    location /off/ { ailuros_request off; return 200; }
+    location /off/ { decision_waf_request off; return 200; }
 }
 `
 	if ok, out := harness.CheckConfig(t, valid); !ok {
@@ -265,12 +265,12 @@ server {
 	cases := []struct {
 		name, directive, conf string
 	}{
-		{"uri without slash", "ailuros_request",
-			`server { listen 8080; location / { ailuros_request _ailuros; return 200; } }`},
-		{"unknown unavailable mode", "ailuros_request_unavailable",
-			`server { listen 8080; location / { ailuros_request_unavailable maybe; return 200; } }`},
-		{"set without variable", "ailuros_request_set",
-			`server { listen 8080; location / { ailuros_request_set ailuros_request_id $upstream_http_x_ailuros_request_id; return 200; } }`},
+		{"uri without slash", "decision_waf_request",
+			`server { listen 8080; location / { decision_waf_request _decision_waf; return 200; } }`},
+		{"unknown unavailable mode", "decision_waf_request_unavailable",
+			`server { listen 8080; location / { decision_waf_request_unavailable maybe; return 200; } }`},
+		{"set without variable", "decision_waf_request_set",
+			`server { listen 8080; location / { decision_waf_request_set decision_waf_request_id $upstream_http_x_decision_waf_request_id; return 200; } }`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

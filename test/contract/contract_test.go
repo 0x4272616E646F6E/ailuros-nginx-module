@@ -1,7 +1,7 @@
-// Package contract runs the module against the published Ailuros, to check
+// Package contract runs the module against the published decision-waf, to check
 // the wire contract the stub in the behaviour suite assumes: the headers
-// Ailuros reads, the status codes and request ID it returns, and its decision
-// log. The model behind Ailuros is a local stub (harness/stub/model.go).
+// decision-waf reads, the status codes and request ID it returns, and its decision
+// log. The model behind decision-waf is a local stub (harness/stub/model.go).
 package contract
 
 import (
@@ -14,14 +14,31 @@ import (
 	"testing"
 	"time"
 
-	"github.com/0x4272616E646F6E/ailuros-nginx-module/test/harness"
+	"github.com/0x4272616E646F6E/decision-waf-nginx-module/test/harness"
 )
 
-// ailurosImage is ghcr.io/0x4272616e646f6e/ailuros:0.1.0, pinned by digest.
-const ailurosImage = "ghcr.io/0x4272616e646f6e/ailuros@sha256:b7540bacf0a1729bba473f728119157cc584f28449aa52b763d5e502f41db273"
+// legacyAilurosImage is ghcr.io/0x4272616e646f6e/ailuros:0.1.0, pinned by
+// digest, with the environment it reads and the upstream variable of the
+// request ID header it answers with.
+const (
+	legacyAilurosImage  = "ghcr.io/0x4272616e646f6e/ailuros@sha256:b7540bacf0a1729bba473f728119157cc584f28449aa52b763d5e502f41db273"
+	backendRequestIDVar = "$upstream_http_x_ailuros_request_id"
+)
 
-// The /_ailuros location is the one in deploy/ngf/snippetspolicy.yaml, read
-// from that file and reindented, with only the Ailuros host swapped for the
+func legacyAilurosEnv() map[string]string {
+	return map[string]string{
+		"AILUROS_INSPECTION_MODE":     "lite",
+		"AILUROS_CLASSIFIER_BACKEND":  "openai",
+		"AILUROS_CLASSIFIER_BASE_URL": "http://model:8000/v1",
+		"AILUROS_CLASSIFIER_MODEL":    "stub",
+		"AILUROS_FORWARDAUTH_ADDR":    ":9002",
+		"AILUROS_EXTPROC_ADDR":        "",
+		"AILUROS_EXTAUTHZ_ADDR":       "",
+	}
+}
+
+// The /_decision_waf location is the one in deploy/ngf/snippetspolicy.yaml, read
+// from that file and reindented, with only the decision-waf host swapped for the
 // compose service name (see shippedLocation).
 var conf = `
 server {
@@ -30,19 +47,19 @@ server {
 ` + shippedLocation() + `
 
     location /closed/ {
-        ailuros_request /_ailuros;
-        ailuros_request_set $ailuros_request_id $upstream_http_x_ailuros_request_id;
-        add_header X-Status $ailuros_request_status always;
-        add_header X-Ailuros-Request-Id $ailuros_request_id always;
+        decision_waf_request /_decision_waf;
+        decision_waf_request_set $decision_waf_request_id ` + backendRequestIDVar + `;
+        add_header X-Status $decision_waf_request_status always;
+        add_header X-Decision-Waf-Request-Id $decision_waf_request_id always;
         proxy_pass http://echo:8080/;
     }
 
     location /open/ {
-        ailuros_request /_ailuros;
-        ailuros_request_set $ailuros_request_id $upstream_http_x_ailuros_request_id;
-        ailuros_request_unavailable open;
-        add_header X-Status $ailuros_request_status always;
-        add_header X-Ailuros-Request-Id $ailuros_request_id always;
+        decision_waf_request /_decision_waf;
+        decision_waf_request_set $decision_waf_request_id ` + backendRequestIDVar + `;
+        decision_waf_request_unavailable open;
+        add_header X-Status $decision_waf_request_status always;
+        add_header X-Decision-Waf-Request-Id $decision_waf_request_id always;
         proxy_pass http://echo:8080/;
     }
 
@@ -50,10 +67,10 @@ server {
 }
 `
 
-// shippedLocation returns the `location = /_ailuros { ... }` block of
+// shippedLocation returns the `location = /_decision_waf { ... }` block of
 // deploy/ngf/snippetspolicy.yaml, byte for byte (the `value: |` indentation
 // replaced by the test config's), except that the Service host
-// ailuros.default.svc.cluster.local becomes the compose service "ailuros" and
+// decision-waf.default.svc.cluster.local becomes the compose service "decision-waf" and
 // the cluster DNS resolver becomes Docker's embedded DNS.
 func shippedLocation() string {
 	data, err := os.ReadFile("../../deploy/ngf/snippetspolicy.yaml")
@@ -64,7 +81,7 @@ func shippedLocation() string {
 	var out []string
 	in := false
 	for _, line := range strings.Split(string(data), "\n") {
-		if line == indent+"location = /_ailuros {" {
+		if line == indent+"location = /_decision_waf {" {
 			in = true
 		}
 		if !in {
@@ -76,17 +93,17 @@ func shippedLocation() string {
 		}
 	}
 	loc := strings.Join(out, "\n")
-	if !in || !strings.HasSuffix(loc, "    }") || !strings.Contains(loc, "set $ailuros_upstream ailuros.default.svc.cluster.local:9002;") ||
+	if !in || !strings.HasSuffix(loc, "    }") || !strings.Contains(loc, "set $decision_waf_upstream decision-waf.default.svc.cluster.local:9002;") ||
 		!strings.Contains(loc, "resolver 10.96.0.10 ") {
-		panic("deploy/ngf/snippetspolicy.yaml: /_ailuros location not found in the expected form")
+		panic("deploy/ngf/snippetspolicy.yaml: /_decision_waf location not found in the expected form")
 	}
-	loc = strings.Replace(loc, "ailuros.default.svc.cluster.local", "ailuros", 1)
+	loc = strings.Replace(loc, "decision-waf.default.svc.cluster.local", "decision-waf", 1)
 	return strings.Replace(loc, "resolver 10.96.0.10 ", "resolver 127.0.0.11 ", 1)
 }
 
 var requestID = regexp.MustCompile(`^[0-9a-f]{16}$`)
 
-// decision is the fields of Ailuros's decision log line the test reads.
+// decision is the fields of decision-waf's decision log line the test reads.
 type decision struct {
 	Msg       string `json:"msg"`
 	RequestID string `json:"request_id"`
@@ -98,12 +115,12 @@ type decision struct {
 	ClientIP  string `json:"client_ip"`
 }
 
-// waitDecision polls Ailuros's log for the decision line of id.
+// waitDecision polls decision-waf's log for the decision line of id.
 func waitDecision(t *testing.T, s *harness.Stack, id string) decision {
 	t.Helper()
 	var log string
 	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(200 * time.Millisecond) {
-		log = s.AilurosLog(t)
+		log = s.DecisionWafLog(t)
 		for _, line := range strings.Split(log, "\n") {
 			var d decision
 			if json.Unmarshal([]byte(line), &d) == nil && d.Msg == "decision" && d.RequestID == id {
@@ -111,7 +128,7 @@ func waitDecision(t *testing.T, s *harness.Stack, id string) decision {
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("no decision log line for request %s; ailuros log:\n%s", id, log)
+			t.Fatalf("no decision log line for request %s; decision-waf log:\n%s", id, log)
 		}
 	}
 }
@@ -119,8 +136,8 @@ func waitDecision(t *testing.T, s *harness.Stack, id string) decision {
 // forgedIP is the client IP the forged headers claim (TEST-NET-3).
 const forgedIP = "203.0.113.9"
 
-// appHost is the Host every contract request is sent with; Ailuros must see
-// it, not the /_ailuros proxy_pass host or a client's X-Forwarded-Host.
+// appHost is the Host every contract request is sent with; decision-waf must see
+// it, not the /_decision_waf proxy_pass host or a client's X-Forwarded-Host.
 const appHost = "app.example"
 
 func get(t *testing.T, s *harness.Stack, path string, headers map[string]string) *http.Response {
@@ -136,11 +153,11 @@ func get(t *testing.T, s *harness.Stack, path string, headers map[string]string)
 	return s.Do(t, req)
 }
 
-func TestRealAilurosContract(t *testing.T) {
-	s := harness.Up(t, harness.Config{NGINXConf: conf, RealAiluros: ailurosImage})
+func TestRealDecisionWafContract(t *testing.T) {
+	s := harness.Up(t, harness.Config{NGINXConf: conf, RealDecisionWaf: legacyAilurosImage, RealDecisionWafEnv: legacyAilurosEnv()})
 
 	// forged are client headers that would break or fool a proxy that passed
-	// them on: with X-Forwarded-Uri next to X-Original-URI Ailuros answers 500,
+	// them on: with X-Forwarded-Uri next to X-Original-URI decision-waf answers 500,
 	// a forged X-Original-URI would have the wrong path classified, a forged
 	// X-Forwarded-Host would pick another route's policy, and a forged
 	// X-Real-IP or X-Forwarded-For would set the client IP.
@@ -181,9 +198,9 @@ func TestRealAilurosContract(t *testing.T) {
 				if got := len(s.EchoCalls()) - before; (got == 1) != tc.wantEcho || got > 1 {
 					t.Errorf("echo called %d times, want called=%v", got, tc.wantEcho)
 				}
-				id := resp.Header.Get("X-Ailuros-Request-Id")
+				id := resp.Header.Get("X-Decision-Waf-Request-Id")
 				if !requestID.MatchString(id) {
-					t.Fatalf("X-Ailuros-Request-Id = %q, want 16 hex characters", id)
+					t.Fatalf("X-Decision-Waf-Request-Id = %q, want 16 hex characters", id)
 				}
 				d := waitDecision(t, s, id)
 				if d.Outcome != tc.wantOutcome || d.Method != "GET" || d.Path != tc.wantPath || d.Frontend != "forwardauth" {
@@ -214,9 +231,9 @@ func TestRealAilurosContract(t *testing.T) {
 		}
 	})
 
-	s.StopAiluros()
+	s.StopDecisionWaf()
 
-	t.Run("ailuros down, closed", func(t *testing.T) {
+	t.Run("decision-waf down, closed", func(t *testing.T) {
 		before := len(s.EchoCalls())
 		resp := get(t, s, "/closed/hello", nil)
 		if resp.StatusCode != http.StatusServiceUnavailable {
@@ -227,7 +244,7 @@ func TestRealAilurosContract(t *testing.T) {
 		}
 	})
 
-	t.Run("ailuros down, open", func(t *testing.T) {
+	t.Run("decision-waf down, open", func(t *testing.T) {
 		before := len(s.EchoCalls())
 		logBefore := s.ErrorLog()
 		resp := get(t, s, "/open/hello", nil)
@@ -239,13 +256,13 @@ func TestRealAilurosContract(t *testing.T) {
 		}
 		var warned bool
 		for _, line := range strings.Split(strings.TrimPrefix(s.ErrorLog(), logBefore), "\n") {
-			if strings.Contains(line, "[warn]") && strings.Contains(line, "ailuros_request") {
+			if strings.Contains(line, "[warn]") && strings.Contains(line, "decision_waf_request") {
 				warned = true
 				t.Logf("warning: %s", line)
 			}
 		}
 		if !warned {
-			t.Errorf("no fail-open [warn] line mentioning ailuros_request in the nginx log")
+			t.Errorf("no fail-open [warn] line mentioning decision_waf_request in the nginx log")
 		}
 	})
 }

@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/0x4272616E646F6E/ailuros-nginx-module/test/harness"
+	"github.com/0x4272616E646F6E/decision-waf-nginx-module/test/harness"
 )
 
 // requestsConf serves plain HTTP on 8080 and HTTP/2 over TLS on 8443 from
@@ -35,11 +35,11 @@ server {
     large_client_header_buffers 4 32k;
     client_max_body_size 4m;
 
-    ailuros_request /_ailuros;
+    decision_waf_request /_decision_waf;
 
-    location = /_ailuros {
+    location = /_decision_waf {
         internal;
-        proxy_pass http://ailuros:9002;
+        proxy_pass http://decision-waf:9002;
         proxy_pass_request_body off;
         proxy_cache off;
         proxy_set_header Content-Length "";
@@ -71,7 +71,7 @@ func randomBytes(t *testing.T, n int) []byte {
 
 func TestMethodsAndBody(t *testing.T) {
 	stack := harness.Up(t, harness.Config{NGINXConf: requestsConf})
-	stack.SetAilurosAnswer(200, 0, nil)
+	stack.SetDecisionWafAnswer(200, 0, nil)
 
 	body64k := randomBytes(t, 64*1024)
 	cases := []struct {
@@ -86,7 +86,7 @@ func TestMethodsAndBody(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.method, func(t *testing.T) {
 			uri := "/c/" + strings.ToLower(tc.method) + "?a=1&b=two%20words"
-			ailurosBefore, echoBefore := len(stack.AilurosCalls()), len(stack.EchoCalls())
+			decisionWafBefore, echoBefore := len(stack.DecisionWafCalls()), len(stack.EchoCalls())
 
 			var rd io.Reader
 			if tc.body != nil {
@@ -101,9 +101,9 @@ func TestMethodsAndBody(t *testing.T) {
 				t.Fatalf("status = %d, want 200", resp.StatusCode)
 			}
 
-			ac := stack.AilurosCalls()[ailurosBefore:]
+			ac := stack.DecisionWafCalls()[decisionWafBefore:]
 			if len(ac) != 1 {
-				t.Fatalf("ailuros calls = %d, want 1", len(ac))
+				t.Fatalf("decision-waf calls = %d, want 1", len(ac))
 			}
 			if got := ac[0].Header.Get("X-Original-Method"); got != tc.method {
 				t.Errorf("X-Original-Method = %q, want %q", got, tc.method)
@@ -112,7 +112,7 @@ func TestMethodsAndBody(t *testing.T) {
 				t.Errorf("X-Original-URI = %q, want %q", got, uri)
 			}
 			if len(ac[0].Body) != 0 {
-				t.Errorf("ailuros received a %d-byte body, want none", len(ac[0].Body))
+				t.Errorf("decision-waf received a %d-byte body, want none", len(ac[0].Body))
 			}
 
 			ec := stack.EchoCalls()[echoBefore:]
@@ -150,8 +150,8 @@ func TestExpectContinue(t *testing.T) {
 
 	t.Run("allow", func(t *testing.T) {
 		const delay = 1 * time.Second
-		stack.SetAilurosAnswer(200, delay, nil)
-		ailurosBefore, echoBefore := len(stack.AilurosCalls()), len(stack.EchoCalls())
+		stack.SetDecisionWafAnswer(200, delay, nil)
+		decisionWafBefore, echoBefore := len(stack.DecisionWafCalls()), len(stack.EchoCalls())
 
 		conn := stack.Dial(t)
 		br := bufio.NewReader(conn)
@@ -172,10 +172,10 @@ func TestExpectContinue(t *testing.T) {
 			t.Fatal(err)
 		}
 		if took < delay-100*time.Millisecond {
-			t.Errorf("100 Continue after %v, before Ailuros's %v answer", took, delay)
+			t.Errorf("100 Continue after %v, before decision-waf's %v answer", took, delay)
 		}
-		if got := len(stack.AilurosCalls()) - ailurosBefore; got != 1 {
-			t.Errorf("ailuros calls when 100 Continue arrived = %d, want 1", got)
+		if got := len(stack.DecisionWafCalls()) - decisionWafBefore; got != 1 {
+			t.Errorf("decision-waf calls when 100 Continue arrived = %d, want 1", got)
 		}
 		if got := len(stack.EchoCalls()) - echoBefore; got != 0 {
 			t.Errorf("echo calls before the body was sent = %d, want 0", got)
@@ -195,8 +195,8 @@ func TestExpectContinue(t *testing.T) {
 	})
 
 	t.Run("block", func(t *testing.T) {
-		stack.SetAilurosAnswer(403, 0, nil)
-		ailurosBefore, echoBefore := len(stack.AilurosCalls()), len(stack.EchoCalls())
+		stack.SetDecisionWafAnswer(403, 0, nil)
+		decisionWafBefore, echoBefore := len(stack.DecisionWafCalls()), len(stack.EchoCalls())
 
 		conn := stack.Dial(t)
 		br := bufio.NewReader(conn)
@@ -215,8 +215,8 @@ func TestExpectContinue(t *testing.T) {
 		// NGINX closes) must not get it to the upstream either.
 		_, _ = conn.Write(body)
 		time.Sleep(500 * time.Millisecond)
-		if got := len(stack.AilurosCalls()) - ailurosBefore; got != 1 {
-			t.Errorf("ailuros calls = %d, want 1", got)
+		if got := len(stack.DecisionWafCalls()) - decisionWafBefore; got != 1 {
+			t.Errorf("decision-waf calls = %d, want 1", got)
 		}
 		if got := len(stack.EchoCalls()) - echoBefore; got != 0 {
 			t.Errorf("echo calls = %d, want 0", got)
@@ -244,51 +244,51 @@ func TestHTTP2(t *testing.T) {
 	}
 
 	t.Run("allow", func(t *testing.T) {
-		stack.SetAilurosAnswer(200, 0, nil)
-		a, e := len(stack.AilurosCalls()), len(stack.EchoCalls())
+		stack.SetDecisionWafAnswer(200, 0, nil)
+		a, e := len(stack.DecisionWafCalls()), len(stack.EchoCalls())
 		resp := get(t, "/c/h2?x=1")
 		if resp.StatusCode != 200 {
 			t.Errorf("status = %d, want 200", resp.StatusCode)
 		}
-		ac := stack.AilurosCalls()[a:]
+		ac := stack.DecisionWafCalls()[a:]
 		if len(ac) != 1 || ac[0].Header.Get("X-Original-URI") != "/c/h2?x=1" || ac[0].Header.Get("X-Original-Method") != "GET" {
-			t.Errorf("ailuros calls = %+v, want one for GET /c/h2?x=1", ac)
+			t.Errorf("decision-waf calls = %+v, want one for GET /c/h2?x=1", ac)
 		}
 		if got := len(stack.EchoCalls()) - e; got != 1 {
 			t.Errorf("echo calls = %d, want 1", got)
 		}
 	})
 	t.Run("block", func(t *testing.T) {
-		stack.SetAilurosAnswer(403, 0, nil)
-		a, e := len(stack.AilurosCalls()), len(stack.EchoCalls())
+		stack.SetDecisionWafAnswer(403, 0, nil)
+		a, e := len(stack.DecisionWafCalls()), len(stack.EchoCalls())
 		resp := get(t, "/c/h2-blocked")
 		if resp.StatusCode != 403 {
 			t.Errorf("status = %d, want 403", resp.StatusCode)
 		}
-		if got := len(stack.AilurosCalls()) - a; got != 1 {
-			t.Errorf("ailuros calls = %d, want 1", got)
+		if got := len(stack.DecisionWafCalls()) - a; got != 1 {
+			t.Errorf("decision-waf calls = %d, want 1", got)
 		}
 		if got := len(stack.EchoCalls()) - e; got != 0 {
 			t.Errorf("echo calls = %d, want 0", got)
 		}
 	})
 	t.Run("once per request with error_page", func(t *testing.T) {
-		stack.SetAilurosAnswer(200, 0, nil)
-		a, e := len(stack.AilurosCalls()), len(stack.EchoCalls())
+		stack.SetDecisionWafAnswer(200, 0, nil)
+		a, e := len(stack.DecisionWafCalls()), len(stack.EchoCalls())
 		resp := get(t, "/ep/h2")
 		if resp.StatusCode != 200 {
 			t.Errorf("status = %d, want 200", resp.StatusCode)
 		}
-		if got := len(stack.AilurosCalls()) - a; got != 1 {
-			t.Errorf("ailuros calls = %d, want 1", got)
+		if got := len(stack.DecisionWafCalls()) - a; got != 1 {
+			t.Errorf("decision-waf calls = %d, want 1", got)
 		}
 		if got := len(stack.EchoCalls()) - e; got != 1 {
 			t.Errorf("echo (@named) calls = %d, want 1", got)
 		}
 	})
 	t.Run("post body", func(t *testing.T) {
-		stack.SetAilurosAnswer(200, 0, nil)
-		a, e := len(stack.AilurosCalls()), len(stack.EchoCalls())
+		stack.SetDecisionWafAnswer(200, 0, nil)
+		a, e := len(stack.DecisionWafCalls()), len(stack.EchoCalls())
 		body := randomBytes(t, 256*1024)
 		resp, err := client.Post(url("/c/h2-post"), "application/octet-stream", bytes.NewReader(body))
 		if err != nil {
@@ -298,9 +298,9 @@ func TestHTTP2(t *testing.T) {
 		if resp.ProtoMajor != 2 {
 			t.Errorf("protocol = %s, want HTTP/2", resp.Proto)
 		}
-		ac, ec := stack.AilurosCalls()[a:], stack.EchoCalls()[e:]
+		ac, ec := stack.DecisionWafCalls()[a:], stack.EchoCalls()[e:]
 		if len(ac) != 1 || len(ac[0].Body) != 0 {
-			t.Errorf("ailuros calls = %d (first body %d bytes), want 1 with no body", len(ac), len(ac[0].Body))
+			t.Errorf("decision-waf calls = %d (first body %d bytes), want 1 with no body", len(ac), len(ac[0].Body))
 		}
 		if resp.StatusCode != 200 || len(ec) != 1 || !bytes.Equal(ec[0].Body, body) {
 			t.Errorf("status = %d, echo calls = %d; want 200 and the full body", resp.StatusCode, len(ec))
@@ -310,9 +310,9 @@ func TestHTTP2(t *testing.T) {
 
 func TestLargeHeaders(t *testing.T) {
 	stack := harness.Up(t, harness.Config{NGINXConf: requestsConf})
-	stack.SetAilurosAnswer(200, 0, nil)
+	stack.SetDecisionWafAnswer(200, 0, nil)
 
-	a0, e0 := len(stack.AilurosCalls()), len(stack.EchoCalls())
+	a0, e0 := len(stack.DecisionWafCalls()), len(stack.EchoCalls())
 	cookie := "session=" + strings.Repeat("a", 16*1024-len("session="))
 	req, _ := http.NewRequest(http.MethodGet, "/c/large", nil)
 	req.Header.Set("Cookie", cookie)
@@ -320,12 +320,12 @@ func TestLargeHeaders(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	ac, ec := stack.AilurosCalls()[a0:], stack.EchoCalls()[e0:]
+	ac, ec := stack.DecisionWafCalls()[a0:], stack.EchoCalls()[e0:]
 	if len(ac) != 1 || len(ec) != 1 {
-		t.Fatalf("ailuros calls = %d, echo calls = %d, want 1 each", len(ac), len(ec))
+		t.Fatalf("decision-waf calls = %d, echo calls = %d, want 1 each", len(ac), len(ec))
 	}
 	if got := ac[0].Header.Get("Cookie"); got != cookie {
-		t.Errorf("ailuros saw a %d-byte Cookie, want the %d-byte original", len(got), len(cookie))
+		t.Errorf("decision-waf saw a %d-byte Cookie, want the %d-byte original", len(got), len(cookie))
 	}
 	if got := ec[0].Header.Get("Cookie"); got != cookie {
 		t.Errorf("echo saw a %d-byte Cookie, want the %d-byte original", len(got), len(cookie))
@@ -337,9 +337,9 @@ func TestLargeHeaders(t *testing.T) {
 // would block it.
 func TestKeepaliveAfterBlock(t *testing.T) {
 	stack := harness.Up(t, harness.Config{NGINXConf: requestsConf})
-	stack.SetAilurosRoutes(200, map[string]int{"/c/blocked": 403})
+	stack.SetDecisionWafRoutes(200, map[string]int{"/c/blocked": 403})
 
-	a0, e0 := len(stack.AilurosCalls()), len(stack.EchoCalls())
+	a0, e0 := len(stack.DecisionWafCalls()), len(stack.EchoCalls())
 	conn := stack.Dial(t)
 	br := bufio.NewReader(conn)
 	_ = conn.SetDeadline(time.Now().Add(20 * time.Second))
@@ -357,9 +357,9 @@ func TestKeepaliveAfterBlock(t *testing.T) {
 	if resp := send("/c/allowed"); resp.StatusCode != 200 {
 		t.Fatalf("second status (same connection) = %d, want 200", resp.StatusCode)
 	}
-	ac, ec := stack.AilurosCalls()[a0:], stack.EchoCalls()[e0:]
+	ac, ec := stack.DecisionWafCalls()[a0:], stack.EchoCalls()[e0:]
 	if len(ac) != 2 {
-		t.Errorf("ailuros calls = %d, want 2 (one per request)", len(ac))
+		t.Errorf("decision-waf calls = %d, want 2 (one per request)", len(ac))
 	}
 	if len(ec) != 1 || ec[0].URI != "/c/allowed" {
 		t.Errorf("echo calls = %+v, want only /c/allowed", ec)
@@ -368,10 +368,10 @@ func TestKeepaliveAfterBlock(t *testing.T) {
 
 func TestKeepaliveAndConcurrency(t *testing.T) {
 	stack := harness.Up(t, harness.Config{NGINXConf: requestsConf})
-	stack.SetAilurosRoutes(200, map[string]int{"/c/b/": 403, "/c/r/": 413, "/c/w/": 400})
+	stack.SetDecisionWafRoutes(200, map[string]int{"/c/b/": 403, "/c/r/": 413, "/c/w/": 400})
 
 	const conns, perConn = 20, 10
-	before := len(stack.AilurosCalls())
+	before := len(stack.DecisionWafCalls())
 	echoBefore := len(stack.EchoCalls())
 	kinds := []struct {
 		prefix string
@@ -443,8 +443,8 @@ func TestKeepaliveAndConcurrency(t *testing.T) {
 	if reused != wantReused {
 		t.Errorf("reused connections = %d, want %d", reused, wantReused)
 	}
-	if got := len(stack.AilurosCalls()) - before; got != conns*perConn {
-		t.Errorf("ailuros calls = %d, want %d", got, conns*perConn)
+	if got := len(stack.DecisionWafCalls()) - before; got != conns*perConn {
+		t.Errorf("decision-waf calls = %d, want %d", got, conns*perConn)
 	}
 	seen := map[string]int{}
 	echoCalls := stack.EchoCalls()[echoBefore:]
@@ -464,24 +464,24 @@ func TestKeepaliveAndConcurrency(t *testing.T) {
 
 func TestClientHangsUp(t *testing.T) {
 	stack := harness.Up(t, harness.Config{NGINXConf: requestsConf})
-	stack.SetAilurosAnswer(200, 2*time.Second, nil)
-	a0, e0 := len(stack.AilurosCalls()), len(stack.EchoCalls())
+	stack.SetDecisionWafAnswer(200, 2*time.Second, nil)
+	a0, e0 := len(stack.DecisionWafCalls()), len(stack.EchoCalls())
 
 	conn := stack.Dial(t)
 	if _, err := io.WriteString(conn, "GET /c/hangup HTTP/1.1\r\nHost: x\r\n\r\n"); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
-	for len(stack.AilurosCalls()) == a0 {
+	for len(stack.DecisionWafCalls()) == a0 {
 		if time.Now().After(deadline) {
-			t.Fatal("ailuros was never asked")
+			t.Fatal("decision-waf was never asked")
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	conn.Close()
 	time.Sleep(3 * time.Second)
 
-	stack.SetAilurosAnswer(200, 0, nil)
+	stack.SetDecisionWafAnswer(200, 0, nil)
 	if resp := stack.Get(t, "/c/after"); resp.StatusCode != 200 {
 		t.Errorf("request after the hang-up: status = %d, want 200", resp.StatusCode)
 	}
@@ -494,21 +494,21 @@ func TestClientHangsUp(t *testing.T) {
 			t.Errorf("error log contains %s:\n%s", bad, log)
 		}
 	}
-	calls := stack.AilurosCalls()[a0:]
+	calls := stack.DecisionWafCalls()[a0:]
 	if len(calls) != 2 {
-		t.Errorf("ailuros calls = %d, want 2 (the abandoned one and the later one)", len(calls))
+		t.Errorf("decision-waf calls = %d, want 2 (the abandoned one and the later one)", len(calls))
 	}
 }
 
 const reloadConfTemplate = `
 server {
     listen 8080;
-    ailuros_request /_ailuros;
-    ailuros_request_unavailable %s;
+    decision_waf_request /_decision_waf;
+    decision_waf_request_unavailable %s;
 
-    location = /_ailuros {
+    location = /_decision_waf {
         internal;
-        proxy_pass http://ailuros:9002;
+        proxy_pass http://decision-waf:9002;
         proxy_pass_request_body off;
         proxy_cache off;
         proxy_set_header Content-Length "";
@@ -519,7 +519,7 @@ server {
 }
 `
 
-// TestReloadMidCheck: ten requests are mid-check (Ailuros answers 500, "no
+// TestReloadMidCheck: ten requests are mid-check (decision-waf answers 500, "no
 // decision", after 4 s) when NGINX reloads from "closed" to "open". The
 // outcome depends on the policy, so it shows which configuration decided:
 // the in-flight requests get the old one's 503, a request after the reload
@@ -528,10 +528,10 @@ server {
 func TestReloadMidCheck(t *testing.T) {
 	stack := harness.Up(t, harness.Config{NGINXConf: fmt.Sprintf(reloadConfTemplate, "closed")})
 	const delay = 4 * time.Second
-	stack.SetAilurosAnswer(500, delay, nil)
+	stack.SetDecisionWafAnswer(500, delay, nil)
 
 	const n = 10
-	a0, e0 := len(stack.AilurosCalls()), len(stack.EchoCalls())
+	a0, e0 := len(stack.DecisionWafCalls()), len(stack.EchoCalls())
 	type result struct {
 		status int
 		err    error
@@ -555,9 +555,9 @@ func TestReloadMidCheck(t *testing.T) {
 		}()
 	}
 	deadline := time.Now().Add(10 * time.Second)
-	for len(stack.AilurosCalls())-a0 < n {
+	for len(stack.DecisionWafCalls())-a0 < n {
 		if time.Now().After(deadline) {
-			t.Fatalf("only %d of %d requests reached ailuros", len(stack.AilurosCalls())-a0, n)
+			t.Fatalf("only %d of %d requests reached decision-waf", len(stack.DecisionWafCalls())-a0, n)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -589,14 +589,14 @@ func TestReloadMidCheck(t *testing.T) {
 		}
 	}
 	if d := time.Since(start); d < delay-500*time.Millisecond {
-		t.Errorf("in-flight requests took %v, want about the %v Ailuros delay", d, delay)
+		t.Errorf("in-flight requests took %v, want about the %v decision-waf delay", d, delay)
 	}
 	if got := len(stack.EchoCalls()) - e0; got != 0 {
 		t.Errorf("echo calls = %d, want 0 (closed config refused all ten)", got)
 	}
 
 	// The new configuration: no decision now means continue, with a warning.
-	stack.SetAilurosAnswer(500, 0, nil)
+	stack.SetDecisionWafAnswer(500, 0, nil)
 	logBefore = stack.ErrorLog()
 	var last int
 	for deadline = time.Now().Add(10 * time.Second); ; time.Sleep(200 * time.Millisecond) {
@@ -608,7 +608,7 @@ func TestReloadMidCheck(t *testing.T) {
 	if last != 200 {
 		t.Errorf("request after reload: status = %d, want 200 (open)", last)
 	}
-	if log := waitLog(stack, logBefore, true); !hasLine(log, "[warn]", "ailuros_request") {
+	if log := waitLog(stack, logBefore, true); !hasLine(log, "[warn]", "decision_waf_request") {
 		t.Errorf("no fail-open warning after the reload; new log:\n%s", log)
 	}
 	log := stack.ErrorLog()

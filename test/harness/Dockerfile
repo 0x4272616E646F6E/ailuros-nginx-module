@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# Test-only image for the behaviour suite's stubs (Ailuros, tinyauth, echo).
+# Test-only image for the behaviour suite's stubs (decision-waf, tinyauth, echo).
 # Built locally by the harness from the test/ directory; never published.
 FROM golang:1.27-alpine AS build
 WORKDIR /src

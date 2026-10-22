@@ -1,16 +1,16 @@
-// Command stub is the behaviour suite's stand-in for Ailuros, tinyauth and
+// Command stub is the behaviour suite's stand-in for decision-waf, tinyauth and
 // the echo upstream. It serves the role's traffic on -listen and a control
 // API on -control:
 //
 //	GET  /calls   the requests received so far, as JSON
 //	POST /answer  {"status": 403, "delay_ms": 0, "headers": {...},
-//	              "routes": {"/block/": 403}} (ailuros; a route overrides the
+//	              "routes": {"/block/": 403}} (decision-waf; a route overrides the
 //	              status for requests whose X-Original-URI starts with its key; the longest key wins)
 //	POST /stop    stop listening on -listen, so connections are refused
 //
 // Roles:
 //
-//	ailuros   answers every request with the configured answer (default 200)
+//	decision-waf   answers every request with the configured answer (default 200)
 //	tinyauth  answers 200 when the request has "Authorization: ok", else 401
 //	echo      answers 200 with a JSON echo of the request
 //	model     an OpenAI-compatible chat completions stub (model.go)
@@ -58,7 +58,7 @@ func (s *state) record(r *http.Request) call {
 }
 
 func main() {
-	role := flag.String("role", "", "ailuros, tinyauth or echo")
+	role := flag.String("role", "", "decision-waf, tinyauth or echo")
 	listen := flag.String("listen", ":8080", "address for the role's traffic")
 	control := flag.String("control", ":9999", "address for the control API")
 	respHeader := flag.String("resp-header", "", "echo role: a \"Name: value\" header to add to every response")
@@ -68,7 +68,7 @@ func main() {
 
 	var h http.HandlerFunc
 	switch *role {
-	case "ailuros":
+	case "decision-waf":
 		h = func(w http.ResponseWriter, r *http.Request) {
 			s.record(r)
 			s.mu.Lock()

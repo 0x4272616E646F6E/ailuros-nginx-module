@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/0x4272616E646F6E/ailuros-nginx-module/test/harness"
+	"github.com/0x4272616E646F6E/decision-waf-nginx-module/test/harness"
 )
 
 // tinyauthLocation is tinyauth's forward-auth location, and @error401 the
@@ -22,23 +22,23 @@ const tinyauthLocation = `
     location @error401 { return 302 http://login.example/?rd=$request_uri; }
 `
 
-// exposedLocation proxies to Ailuros without "internal": its answers are
+// exposedLocation proxies to decision-waf without "internal": its answers are
 // always no decision.
 const exposedLocation = `
     location = /_exposed {
-        proxy_pass http://ailuros:9002;
+        proxy_pass http://decision-waf:9002;
         proxy_pass_request_body off;
         proxy_set_header Content-Length "";
     }
 `
 
-// orderConf has one virtual host per case. ailuros_request is set at server
+// orderConf has one virtual host per case. decision_waf_request is set at server
 // level wherever named locations must inherit it, so that a second check
 // would happen if the result were not reused. Named locations that must reach
 // the preaccess phase proxy to echo: "return" ends a request in the rewrite
 // phase, before any check could run.
 //
-//	stack          ailuros_request, then auth_request /auth (tinyauth)
+//	stack          decision_waf_request, then auth_request /auth (tinyauth)
 //	satisfy        the same with "satisfy any; allow all;"
 //	satisfy-deny   the same with "satisfy any; deny all;"
 //	limited        limit_req at 1r/m, no burst, nodelay
@@ -50,7 +50,7 @@ const exposedLocation = `
 //	               error_page 503 = @named
 //	exposed-open   no decision, open, with an upstream 404 sent to @named
 const orderConf = `
-limit_req_zone $binary_remote_addr zone=ailuros_order:1m rate=1r/m;
+limit_req_zone $binary_remote_addr zone=decision_waf_order:1m rate=1r/m;
 
 server {
     listen 8081;
@@ -60,8 +60,8 @@ server {
 server {
     listen 8080 default_server;
     server_name stack;
-    ailuros_request /_ailuros;
-` + ailurosLocation + tinyauthLocation + `
+    decision_waf_request /_decision_waf;
+` + decisionWafLocation + tinyauthLocation + `
     location /app/ {
         auth_request /auth;
         error_page 401 = @error401;
@@ -72,8 +72,8 @@ server {
 server {
     listen 8080;
     server_name satisfy;
-    ailuros_request /_ailuros;
-` + ailurosLocation + tinyauthLocation + `
+    decision_waf_request /_decision_waf;
+` + decisionWafLocation + tinyauthLocation + `
     location /app/ {
         satisfy any;
         allow all;
@@ -86,8 +86,8 @@ server {
 server {
     listen 8080;
     server_name satisfy-deny;
-    ailuros_request /_ailuros;
-` + ailurosLocation + tinyauthLocation + `
+    decision_waf_request /_decision_waf;
+` + decisionWafLocation + tinyauthLocation + `
     location /app/ {
         satisfy any;
         deny all;
@@ -100,11 +100,11 @@ server {
 server {
     listen 8080;
     server_name limited;
-` + ailurosLocation + `
+` + decisionWafLocation + `
     location /app/ {
         # burst defaults to 0; NGINX rejects an explicit "burst=0"
-        limit_req zone=ailuros_order nodelay;
-        ailuros_request /_ailuros;
+        limit_req zone=decision_waf_order nodelay;
+        decision_waf_request /_decision_waf;
         proxy_pass http://echo:8080;
     }
 }
@@ -112,17 +112,17 @@ server {
 server {
     listen 8080;
     server_name named;
-    ailuros_request /_ailuros;
-    ailuros_request_set $ailuros_request_id $upstream_http_x_ailuros_request_id;
-` + ailurosLocation + `
+    decision_waf_request /_decision_waf;
+    decision_waf_request_set $decision_waf_request_id $upstream_http_x_decision_waf_request_id;
+` + decisionWafLocation + `
     location /app/ {
         proxy_pass http://127.0.0.1:8081;
         proxy_intercept_errors on;
         error_page 404 = @named;
     }
     location @named {
-        add_header X-Ailuros-Request-Id $ailuros_request_id always;
-        add_header X-Status $ailuros_request_status always;
+        add_header X-Decision-Waf-Request-Id $decision_waf_request_id always;
+        add_header X-Status $decision_waf_request_status always;
         proxy_pass http://echo:8080;
     }
 }
@@ -130,8 +130,8 @@ server {
 server {
     listen 8080;
     server_name rewrite;
-    ailuros_request /_ailuros;
-` + ailurosLocation + `
+    decision_waf_request /_decision_waf;
+` + decisionWafLocation + `
     location /old/ { rewrite ^/old/(.*)$ /new/$1 last; }
     location /new/ { proxy_pass http://echo:8080; }
 }
@@ -139,8 +139,8 @@ server {
 server {
     listen 8080;
     server_name blocked;
-    ailuros_request /_ailuros;
-` + ailurosLocation + `
+    decision_waf_request /_decision_waf;
+` + decisionWafLocation + `
     location /inherits/ {
         error_page 403 = @blocked;
         proxy_pass http://echo:8080;
@@ -156,7 +156,7 @@ server {
 server {
     listen 8080;
     server_name exposed-closed;
-    ailuros_request /_exposed;
+    decision_waf_request /_exposed;
 ` + exposedLocation + `
     location /app/ {
         error_page 503 = @named;
@@ -168,8 +168,8 @@ server {
 server {
     listen 8080;
     server_name exposed-open;
-    ailuros_request /_exposed;
-    ailuros_request_unavailable open;
+    decision_waf_request /_exposed;
+    decision_waf_request_unavailable open;
 ` + exposedLocation + `
     location /app/ {
         proxy_pass http://127.0.0.1:8081;
@@ -181,13 +181,13 @@ server {
 `
 
 type orderResult struct {
-	status            int
-	body              string
-	header            http.Header
-	ailuros, tinyauth int // calls during the request
-	echo              int
-	newLog            string
-	logBefore         string
+	status                int
+	body                  string
+	header                http.Header
+	decisionWaf, tinyauth int // calls during the request
+	echo                  int
+	newLog                string
+	logBefore             string
 }
 
 // settledLog waits for the error log to settle and returns what the request
@@ -199,7 +199,7 @@ func (r orderResult) settledLog(stack *harness.Stack) string {
 
 func orderGet(t *testing.T, stack *harness.Stack, host, path string, wantLog bool) orderResult {
 	t.Helper()
-	ailurosBefore := len(stack.AilurosCalls())
+	decisionWafBefore := len(stack.DecisionWafCalls())
 	tinyauthBefore := len(stack.TinyauthCalls())
 	echoBefore := len(stack.EchoCalls())
 	logBefore := stack.ErrorLog()
@@ -213,13 +213,13 @@ func orderGet(t *testing.T, stack *harness.Stack, host, path string, wantLog boo
 	body, _ := io.ReadAll(resp.Body)
 
 	return orderResult{
-		status:   resp.StatusCode,
-		body:     string(body),
-		header:   resp.Header,
-		ailuros:  len(stack.AilurosCalls()) - ailurosBefore,
-		tinyauth: len(stack.TinyauthCalls()) - tinyauthBefore,
-		echo:     len(stack.EchoCalls()) - echoBefore,
-		newLog:   waitLog(stack, logBefore, wantLog),
+		status:      resp.StatusCode,
+		body:        string(body),
+		header:      resp.Header,
+		decisionWaf: len(stack.DecisionWafCalls()) - decisionWafBefore,
+		tinyauth:    len(stack.TinyauthCalls()) - tinyauthBefore,
+		echo:        len(stack.EchoCalls()) - echoBefore,
+		newLog:      waitLog(stack, logBefore, wantLog),
 
 		logBefore: logBefore,
 	}
@@ -235,13 +235,13 @@ func countLines(log string, subs ...string) int {
 	return n
 }
 
-func (r orderResult) check(t *testing.T, status, ailuros, tinyauth int) {
+func (r orderResult) check(t *testing.T, status, decisionWaf, tinyauth int) {
 	t.Helper()
 	if r.status != status {
 		t.Errorf("client status = %d, want %d (body %q)", r.status, status, r.body)
 	}
-	if r.ailuros != ailuros {
-		t.Errorf("ailuros calls = %d, want %d", r.ailuros, ailuros)
+	if r.decisionWaf != decisionWaf {
+		t.Errorf("decision-waf calls = %d, want %d", r.decisionWaf, decisionWaf)
 	}
 	if tinyauth >= 0 && r.tinyauth != tinyauth {
 		t.Errorf("tinyauth calls = %d, want %d", r.tinyauth, tinyauth)
@@ -251,13 +251,13 @@ func (r orderResult) check(t *testing.T, status, ailuros, tinyauth int) {
 func TestRunsBeforeAuthRequest(t *testing.T) {
 	stack := harness.Up(t, harness.Config{NGINXConf: orderConf})
 
-	t.Run("ailuros 403 blocks before tinyauth", func(t *testing.T) {
-		stack.SetAilurosAnswer(403, 0, nil)
+	t.Run("decision-waf 403 blocks before tinyauth", func(t *testing.T) {
+		stack.SetDecisionWafAnswer(403, 0, nil)
 		r := orderGet(t, stack, "stack", "/app/x", false)
 		r.check(t, 403, 1, 0)
 	})
-	t.Run("ailuros 200 then tinyauth 401 redirects to login", func(t *testing.T) {
-		stack.SetAilurosAnswer(200, 0, nil)
+	t.Run("decision-waf 200 then tinyauth 401 redirects to login", func(t *testing.T) {
+		stack.SetDecisionWafAnswer(200, 0, nil)
 		r := orderGet(t, stack, "stack", "/app/x", false)
 		r.check(t, 302, 1, 1)
 		if loc := r.header.Get("Location"); !strings.HasPrefix(loc, "http://login.example/") {
@@ -273,8 +273,8 @@ func TestSatisfyAnyDoesNotSkip(t *testing.T) {
 	stack := harness.Up(t, harness.Config{NGINXConf: orderConf})
 
 	for _, host := range []string{"satisfy", "satisfy-deny"} {
-		t.Run(host+"/ailuros 403 still blocks", func(t *testing.T) {
-			stack.SetAilurosAnswer(403, 0, nil)
+		t.Run(host+"/decision-waf 403 still blocks", func(t *testing.T) {
+			stack.SetDecisionWafAnswer(403, 0, nil)
 			r := orderGet(t, stack, host, "/app/x", false)
 			r.check(t, 403, 1, 0)
 			if r.echo != 0 {
@@ -283,10 +283,10 @@ func TestSatisfyAnyDoesNotSkip(t *testing.T) {
 		})
 	}
 
-	// "satisfy any" combines only access-phase handlers, and an Ailuros
+	// "satisfy any" combines only access-phase handlers, and a decision-waf
 	// allow is not one of them: with "deny all", tinyauth decides alone.
-	t.Run("satisfy-deny/ailuros 200 does not stand in for tinyauth", func(t *testing.T) {
-		stack.SetAilurosAnswer(200, 0, nil)
+	t.Run("satisfy-deny/decision-waf 200 does not stand in for tinyauth", func(t *testing.T) {
+		stack.SetDecisionWafAnswer(200, 0, nil)
 		r := orderGet(t, stack, "satisfy-deny", "/app/x", false)
 		r.check(t, 302, 1, 1)
 		if r.echo != 0 {
@@ -296,10 +296,10 @@ func TestSatisfyAnyDoesNotSkip(t *testing.T) {
 
 	// With "allow all", NGINX's access module (which runs before
 	// auth_request in the access phase) satisfies "satisfy any" on its own,
-	// so tinyauth is not asked, whatever Ailuros said. Ailuros is still
+	// so tinyauth is not asked, whatever decision-waf said. decision-waf is still
 	// asked once.
 	t.Run("satisfy/allow all satisfies the access phase", func(t *testing.T) {
-		stack.SetAilurosAnswer(200, 0, nil)
+		stack.SetDecisionWafAnswer(200, 0, nil)
 		r := orderGet(t, stack, "satisfy", "/app/x", false)
 		r.check(t, 200, 1, 0)
 	})
@@ -307,7 +307,7 @@ func TestSatisfyAnyDoesNotSkip(t *testing.T) {
 
 func TestLimitReqFirst(t *testing.T) {
 	stack := harness.Up(t, harness.Config{NGINXConf: orderConf})
-	stack.SetAilurosAnswer(200, 0, nil)
+	stack.SetDecisionWafAnswer(200, 0, nil)
 
 	first := orderGet(t, stack, "limited", "/app/1", false)
 	first.check(t, 200, 1, 0)
@@ -322,28 +322,28 @@ func TestOncePerRequest(t *testing.T) {
 	stack := harness.Up(t, harness.Config{NGINXConf: orderConf})
 
 	t.Run("error_page 404 = @named after an upstream 404", func(t *testing.T) {
-		stack.SetAilurosAnswer(200, 0, map[string]string{"X-Ailuros-Request-Id": "rid-named"})
+		stack.SetDecisionWafAnswer(200, 0, map[string]string{"X-Decision-Waf-Request-Id": "rid-named"})
 		r := orderGet(t, stack, "named", "/app/x", false)
 		r.check(t, 200, 1, 0)
 		if r.echo != 1 {
 			t.Errorf("upstream (@named) calls = %d, want 1", r.echo)
 		}
-		if got := r.header.Get("X-Ailuros-Request-Id"); got != "rid-named" {
-			t.Errorf("$ailuros_request_id in @named = %q, want rid-named", got)
+		if got := r.header.Get("X-Decision-Waf-Request-Id"); got != "rid-named" {
+			t.Errorf("$decision_waf_request_id in @named = %q, want rid-named", got)
 		}
 		if got := r.header.Get("X-Status"); got != "200" {
-			t.Errorf("$ailuros_request_status in @named = %q, want 200", got)
+			t.Errorf("$decision_waf_request_status in @named = %q, want 200", got)
 		}
 	})
 
 	t.Run("tinyauth @error401", func(t *testing.T) {
-		stack.SetAilurosAnswer(200, 0, nil)
+		stack.SetDecisionWafAnswer(200, 0, nil)
 		r := orderGet(t, stack, "stack", "/app/x", false)
 		r.check(t, 302, 1, 1)
 	})
 
 	t.Run("rewrite last before the check", func(t *testing.T) {
-		stack.SetAilurosAnswer(200, 0, nil)
+		stack.SetDecisionWafAnswer(200, 0, nil)
 		r := orderGet(t, stack, "rewrite", "/old/x", false)
 		r.check(t, 200, 1, 0)
 		if r.echo != 1 {
@@ -351,19 +351,19 @@ func TestOncePerRequest(t *testing.T) {
 		}
 	})
 
-	t.Run("server level, /auth and /_ailuros in the same server", func(t *testing.T) {
-		stack.SetAilurosAnswer(200, 0, nil)
+	t.Run("server level, /auth and /_decision_waf in the same server", func(t *testing.T) {
+		stack.SetDecisionWafAnswer(200, 0, nil)
 		before := len(stack.TinyauthCalls())
 		req, _ := http.NewRequest(http.MethodGet, "/app/x", nil)
 		req.Host = "stack"
 		req.Header.Set("Authorization", "ok")
-		ailurosBefore := len(stack.AilurosCalls())
+		decisionWafBefore := len(stack.DecisionWafCalls())
 		resp := stack.Do(t, req)
 		if resp.StatusCode != 200 {
 			t.Errorf("client status = %d, want 200", resp.StatusCode)
 		}
-		if got := len(stack.AilurosCalls()) - ailurosBefore; got != 1 {
-			t.Errorf("ailuros calls = %d, want 1", got)
+		if got := len(stack.DecisionWafCalls()) - decisionWafBefore; got != 1 {
+			t.Errorf("decision-waf calls = %d, want 1", got)
 		}
 		if got := len(stack.TinyauthCalls()) - before; got != 1 {
 			t.Errorf("tinyauth calls = %d, want 1", got)
@@ -372,7 +372,7 @@ func TestOncePerRequest(t *testing.T) {
 
 	// A reused result reproduces the decision, not only the status.
 	t.Run("blocked, error_page to a location that inherits", func(t *testing.T) {
-		stack.SetAilurosAnswer(403, 0, nil)
+		stack.SetDecisionWafAnswer(403, 0, nil)
 		r := orderGet(t, stack, "blocked", "/inherits/x", false)
 		r.check(t, 403, 1, 0)
 		if r.echo != 0 {
@@ -380,7 +380,7 @@ func TestOncePerRequest(t *testing.T) {
 		}
 	})
 	t.Run("blocked, error_page to a return block page", func(t *testing.T) {
-		stack.SetAilurosAnswer(403, 0, nil)
+		stack.SetDecisionWafAnswer(403, 0, nil)
 		r := orderGet(t, stack, "blocked", "/page/x", false)
 		r.check(t, 403, 1, 0)
 		if r.body != "custom block page\n" {
@@ -388,26 +388,26 @@ func TestOncePerRequest(t *testing.T) {
 		}
 	})
 	t.Run("no decision (not internal), closed, error_page 503 = @named", func(t *testing.T) {
-		stack.SetAilurosAnswer(200, 0, nil)
+		stack.SetDecisionWafAnswer(200, 0, nil)
 		r := orderGet(t, stack, "exposed-closed", "/app/x", true)
 		r.check(t, 503, 1, 0)
 		if r.echo != 0 {
 			t.Errorf("upstream calls = %d, want 0: @named was let through", r.echo)
 		}
 		log := r.settledLog(stack)
-		if n := countLines(log, "[error]", "ailuros_request", "internal"); n != 1 {
+		if n := countLines(log, "[error]", "decision_waf_request", "internal"); n != 1 {
 			t.Errorf("must-be-internal errors = %d, want 1; new log:\n%s", n, log)
 		}
 	})
 	t.Run("no decision (not internal), open, upstream 404 to @named", func(t *testing.T) {
-		stack.SetAilurosAnswer(200, 0, nil)
+		stack.SetDecisionWafAnswer(200, 0, nil)
 		r := orderGet(t, stack, "exposed-open", "/app/x", true)
 		r.check(t, 200, 1, 0)
 		if r.echo != 1 {
 			t.Errorf("upstream (@named) calls = %d, want 1", r.echo)
 		}
 		log := r.settledLog(stack)
-		if n := countLines(log, "[warn]", "ailuros_request"); n != 1 {
+		if n := countLines(log, "[warn]", "decision_waf_request"); n != 1 {
 			t.Errorf("fail-open warnings = %d, want 1; new log:\n%s", n, log)
 		}
 	})
@@ -418,12 +418,12 @@ func TestOncePerRequest(t *testing.T) {
 // reused as a decision.
 func TestStoredDecisionNotWritable(t *testing.T) {
 	for name, conf := range map[string]string{
-		"map": `map $host $ailuros-request-outcome { default continue; }
+		"map": `map $host $decision-waf-request-outcome { default continue; }
 server { listen 8080; location / { return 200; } }`,
-		"ailuros_request_set": `server { listen 8080; ailuros_request_set $ailuros-request-outcome continue; location / { return 200; } }`,
-		"set":                 `server { listen 8080; location / { set $ailuros-request-outcome continue; return 200; } }`,
+		"decision_waf_request_set": `server { listen 8080; decision_waf_request_set $decision-waf-request-outcome continue; location / { return 200; } }`,
+		"set":                      `server { listen 8080; location / { set $decision-waf-request-outcome continue; return 200; } }`,
 		// njs is loaded by the stock NGF image's nginx.conf, not by the ASan image.
-		"js_set": `js_set $ailuros-request-outcome httpmatches.redirect;
+		"js_set": `js_set $decision-waf-request-outcome httpmatches.redirect;
 server { listen 8080; location / { return 200; } }`,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -431,7 +431,7 @@ server { listen 8080; location / { return 200; } }`,
 				t.Skip("njs is only in the stock NGF image")
 			}
 			ok, out := harness.CheckConfig(t, conf)
-			if ok || !strings.Contains(out, `the duplicate "ailuros-request-outcome" variable`) {
+			if ok || !strings.Contains(out, `the duplicate "decision-waf-request-outcome" variable`) {
 				t.Errorf("nginx -t ok = %v, want a duplicate variable error; output:\n%s", ok, out)
 			}
 		})

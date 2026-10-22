@@ -34,16 +34,16 @@ func TestConfigMapScript(t *testing.T) {
 	}
 
 	t.Run("fields", func(t *testing.T) {
-		out, err := runConfigMap(t, []string{"AILUROS_VERSION=v1.2.3"}, so, "2.8.0", "amd64")
+		out, err := runConfigMap(t, []string{"DECISION_WAF_VERSION=v1.2.3"}, so, "2.8.0", "amd64")
 		if err != nil {
 			t.Fatalf("configmap.sh: %v", err)
 		}
 		want := []string{
 			"kind: ConfigMap\n",
-			"  name: ailuros-nginx-module-ngf2.8.0\n",
-			"    app.kubernetes.io/name: ailuros-nginx-module\n",
+			"  name: decision-waf-nginx-module-ngf2.8.0\n",
+			"    app.kubernetes.io/name: decision-waf-nginx-module\n",
 			"    app.kubernetes.io/version: v1.2.3\n",
-			"    ailuros.dev/arch: amd64\n",
+			"    decision-waf.dev/arch: amd64\n",
 			"binaryData:\n",
 		}
 		for _, w := range want {
@@ -51,7 +51,7 @@ func TestConfigMapScript(t *testing.T) {
 				t.Errorf("output lacks %q:\n%s", w, out)
 			}
 		}
-		const key = "  ngx_http_ailuros_module.so: "
+		const key = "  ngx_http_decision_waf_module.so: "
 		i := strings.Index(out, key)
 		if i < 0 {
 			t.Fatalf("no binaryData key:\n%s", out)
@@ -71,17 +71,17 @@ func TestConfigMapScript(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(out, "  namespace: gw\n") || !strings.Contains(out, "ailuros.dev/arch: arm64\n") {
+		if !strings.Contains(out, "  namespace: gw\n") || !strings.Contains(out, "decision-waf.dev/arch: arm64\n") {
 			t.Errorf("namespace or arch missing:\n%s", out)
 		}
 	})
 
 	t.Run("version from file name", func(t *testing.T) {
-		named := filepath.Join(dir, "ngx_http_ailuros_module-v0.4.0-ngf2.8.0-linux-amd64.so")
+		named := filepath.Join(dir, "ngx_http_decision_waf_module-v0.4.0-ngf2.8.0-linux-amd64.so")
 		if err := os.WriteFile(named, payload, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		out, err := runConfigMap(t, []string{"AILUROS_VERSION="}, named, "2.8.0", "amd64")
+		out, err := runConfigMap(t, []string{"DECISION_WAF_VERSION="}, named, "2.8.0", "amd64")
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -21,7 +21,7 @@ func TestDeployNGFTargetsNewestRow(t *testing.T) {
 		file string
 		re   *regexp.Regexp
 	}{
-		{"../../deploy/ngf/helm-values-patch.yaml", regexp.MustCompile(`ailuros-nginx-module-ngf(\d+\.\d+\.\d+)`)},
+		{"../../deploy/ngf/helm-values-patch.yaml", regexp.MustCompile(`decision-waf-nginx-module-ngf(\d+\.\d+\.\d+)`)},
 		{"../../deploy/ngf/helm-values-patch.yaml", regexp.MustCompile(`--version (\d+\.\d+\.\d+)`)},
 		{"../../deploy/ngf/kustomization.yaml", regexp.MustCompile(`ngf(\d+\.\d+\.\d+)`)},
 		{"../../deploy/ngf/README.md", regexp.MustCompile(`NGF (\d+\.\d+\.\d+)`)},

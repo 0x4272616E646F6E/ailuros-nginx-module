@@ -7,10 +7,10 @@ import (
 )
 
 // modelHandler is the "model" role: an OpenAI-compatible chat completions
-// endpoint for the real Ailuros's OpenAI backend. It answers {"category":
+// endpoint for the real decision-waf's OpenAI backend. It answers {"category":
 // "sqli"} when the last user message contains "attack" and {"category":
 // "benign"} otherwise, as choices[0].message.content, with no logprobs. It
-// accepts every request format Ailuros's startup probe tries (json_schema
+// accepts every request format decision-waf's startup probe tries (json_schema
 // and logprobs first), so the probe succeeds on its first attempt, finds no
 // logprobs, and settles on JSON-schema requests without confidences. The
 // probe's own request is GET / with no "attack" in it, so it gets "benign",

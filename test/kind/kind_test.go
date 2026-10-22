@@ -21,24 +21,65 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/0x4272616E646F6E/ailuros-nginx-module/test/harness"
+	"github.com/0x4272616E646F6E/decision-waf-nginx-module/test/harness"
 )
 
 const (
-	cluster  = "ailuros-module-it"
+	cluster  = "decision-waf-module-it"
 	context_ = "kind-" + cluster
-	// ailurosImage is ghcr.io/0x4272616e646f6e/ailuros:0.1.0, pinned by digest
-	// (as in the contract test). The kind node pulls it.
-	ailurosImage = "ghcr.io/0x4272616e646f6e/ailuros@sha256:b7540bacf0a1729bba473f728119157cc584f28449aa52b763d5e502f41db273"
-	ngfChart     = "oci://ghcr.io/nginx/charts/nginx-gateway-fabric"
+	ngfChart = "oci://ghcr.io/nginx/charts/nginx-gateway-fabric"
 	// configMapPrefix starts the module ConfigMap's name in
 	// deploy/ngf/helm-values-patch.yaml; the NGF version follows it.
-	configMapPrefix = "ailuros-nginx-module-ngf"
+	configMapPrefix = "decision-waf-nginx-module-ngf"
 )
+
+// legacyAilurosImage is ghcr.io/0x4272616e646f6e/ailuros:0.1.0, pinned by
+// digest (as in the contract test), with the environment it reads and the
+// upstream variable of the request ID header it answers with, which replaces
+// shippedRequestIDVar in deploy/ngf. The kind node pulls the image.
+const (
+	legacyAilurosImage  = "ghcr.io/0x4272616e646f6e/ailuros@sha256:b7540bacf0a1729bba473f728119157cc584f28449aa52b763d5e502f41db273"
+	backendRequestIDVar = "$upstream_http_x_ailuros_request_id"
+	shippedRequestIDVar = "$upstream_http_x_decision_waf_request_id"
+)
+
+func legacyAilurosEnv() map[string]string {
+	return map[string]string{
+		"AILUROS_INSPECTION_MODE":     "lite",
+		"AILUROS_CLASSIFIER_BACKEND":  "openai",
+		"AILUROS_CLASSIFIER_BASE_URL": "http://model.default.svc.cluster.local:8000/v1",
+		"AILUROS_CLASSIFIER_MODEL":    "stub",
+		"AILUROS_FORWARDAUTH_ADDR":    ":9002",
+		"AILUROS_EXTPROC_ADDR":        "",
+		"AILUROS_EXTAUTHZ_ADDR":       "",
+	}
+}
+
+func backendEnv() string {
+	env := legacyAilurosEnv()
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		fmt.Fprintf(&b, "            - {name: %s, value: %q}\n", k, env[k])
+	}
+	return b.String()
+}
+
+func deployManifests(rendered string) (string, error) {
+	if !strings.Contains(rendered, shippedRequestIDVar) {
+		return "", fmt.Errorf("deploy/ngf has no %s", shippedRequestIDVar)
+	}
+	return strings.ReplaceAll(rendered, shippedRequestIDVar, backendRequestIDVar), nil
+}
 
 var configMapRE = regexp.MustCompile(regexp.QuoteMeta(configMapPrefix) + `(\d+\.\d+\.\d+)`)
 
@@ -123,7 +164,7 @@ func TestNGF(t *testing.T) {
 			t.Fatalf("%s is required for the kind test", tool)
 		}
 	}
-	// The versions.json row under test ($AILUROS_NGF). deploy/ngf targets the
+	// The versions.json row under test ($DECISION_WAF_NGF). deploy/ngf targets the
 	// newest row; for any other row the NGF version in the ConfigMap name of
 	// the values patch is substituted, nothing else is changed.
 	ngf := harness.NGFVersion(t)
@@ -205,14 +246,18 @@ func TestNGF(t *testing.T) {
 		t.Logf("helm install ok")
 	}
 
-	// Workloads: the real Ailuros on the stub model, tinyauth and echo stubs.
+	// Workloads: the real decision-waf on the stub model, tinyauth and echo stubs.
 	e.kubectlIn(t, workloads(e.stubImage), "apply", "-f", "-")
-	for _, d := range []string{"model", "ailuros", "tinyauth", "echo", "spoof"} {
+	for _, d := range []string{"model", "decision-waf", "tinyauth", "echo", "spoof"} {
 		e.kubectl(t, "rollout", "status", "deploy/"+d, "--timeout=180s")
 	}
 
 	// deploy/ngf as documented (policy and filters), then Gateway and routes.
-	e.kubectl(t, "apply", "-k", filepath.Join(root, "deploy", "ngf"))
+	manifests, err := deployManifests(e.kubectl(t, "kustomize", filepath.Join(root, "deploy", "ngf")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.kubectlIn(t, manifests, "apply", "-f", "-")
 	e.kubectlIn(t, gatewayAndRoutes, "apply", "-f", "-")
 	e.kubectl(t, "wait", "--for=condition=Programmed", "gateway/gateway", "--timeout=240s")
 	e.kubectl(t, "rollout", "status", "deploy/gateway-nginx", "--timeout=240s")
@@ -223,7 +268,7 @@ func TestNGF(t *testing.T) {
 			t.Fatalf("containers[0] is %q, want nginx: the JSONPatch in deploy/ngf/helm-values-patch.yaml would mount the module into the wrong container", name)
 		}
 		mounts := e.kubectl(t, "get", "deploy/gateway-nginx", "-o", "jsonpath={.spec.template.spec.containers[0].volumeMounts[*].mountPath}")
-		if !strings.Contains(mounts, "/usr/lib/nginx/modules/ailuros") {
+		if !strings.Contains(mounts, "/usr/lib/nginx/modules/decision-waf") {
 			t.Fatalf("nginx container mounts: %s", mounts)
 		}
 		image := strings.TrimSpace(e.kubectl(t, "get", "deploy/gateway-nginx", "-o", "jsonpath={.spec.template.spec.containers[0].image}"))
@@ -270,11 +315,11 @@ func TestNGF(t *testing.T) {
 	reqID := regexp.MustCompile(`^[0-9a-f]{16}$`)
 	echoHas := func(t *testing.T, svc, needle string) bool { return strings.Contains(e.calls(t, svc), needle) }
 	decisions := func(t *testing.T) int {
-		return strings.Count(e.kubectl(t, "logs", "deploy/ailuros"), `"msg":"decision"`)
+		return strings.Count(e.kubectl(t, "logs", "deploy/decision-waf"), `"msg":"decision"`)
 	}
 
-	t.Run("plain route never calls Ailuros", func(t *testing.T) {
-		// Positive control: a checked request does reach Ailuros and is logged,
+	t.Run("plain route never calls decision-waf", func(t *testing.T) {
+		// Positive control: a checked request does reach decision-waf and is logged,
 		// so the zero below cannot be a log we fail to read.
 		c0 := decisions(t)
 		if r, _ := do(t, "/checked/control", nil); r.StatusCode != 200 {
@@ -282,7 +327,7 @@ func TestNGF(t *testing.T) {
 		}
 		waitFor(t, 15*time.Second, func() error {
 			if decisions(t) <= c0 {
-				return fmt.Errorf("no new Ailuros decision after a checked request")
+				return fmt.Errorf("no new decision-waf decision after a checked request")
 			}
 			return nil
 		})
@@ -291,12 +336,12 @@ func TestNGF(t *testing.T) {
 		if resp.StatusCode != 200 {
 			t.Fatalf("status %d, want 200 (an attack query on an unfiltered route)", resp.StatusCode)
 		}
-		if id := resp.Header.Get("X-Ailuros-Request-Id"); id != "" {
-			t.Errorf("X-Ailuros-Request-Id = %q on a route without the filter", id)
+		if id := resp.Header.Get("X-Decision-Waf-Request-Id"); id != "" {
+			t.Errorf("X-Decision-Waf-Request-Id = %q on a route without the filter", id)
 		}
-		time.Sleep(time.Second) // Ailuros logs its decision after answering
+		time.Sleep(time.Second) // decision-waf logs its decision after answering
 		if d := decisions(t); d != d0 {
-			t.Errorf("Ailuros logged %d new decisions", d-d0)
+			t.Errorf("decision-waf logged %d new decisions", d-d0)
 		}
 		if m := e.callCount(t, "model"); m != m0 {
 			t.Errorf("the model got %d new calls", m-m0)
@@ -309,8 +354,8 @@ func TestNGF(t *testing.T) {
 		if spoof.StatusCode != 200 {
 			t.Fatalf("/spoof/hello: status %d, want 200", spoof.StatusCode)
 		}
-		if v := spoof.Header.Values("X-Ailuros-Request-Id"); len(v) != 0 {
-			t.Errorf("upstream-set X-Ailuros-Request-Id leaked to the client: %q", v)
+		if v := spoof.Header.Values("X-Decision-Waf-Request-Id"); len(v) != 0 {
+			t.Errorf("upstream-set X-Decision-Waf-Request-Id leaked to the client: %q", v)
 		}
 	})
 
@@ -319,23 +364,23 @@ func TestNGF(t *testing.T) {
 		if resp.StatusCode != 200 {
 			t.Fatalf("/checked/hello: status %d, want 200", resp.StatusCode)
 		}
-		if id := resp.Header.Get("X-Ailuros-Request-Id"); !reqID.MatchString(id) {
-			t.Errorf("X-Ailuros-Request-Id = %q, want 16 hex characters", id)
+		if id := resp.Header.Get("X-Decision-Waf-Request-Id"); !reqID.MatchString(id) {
+			t.Errorf("X-Decision-Waf-Request-Id = %q, want 16 hex characters", id)
 		}
 		blocked, _ := do(t, "/checked/blockedpath?q=attack", nil)
 		if blocked.StatusCode != 403 {
 			t.Fatalf("?q=attack: status %d, want 403", blocked.StatusCode)
 		}
-		if id := blocked.Header.Get("X-Ailuros-Request-Id"); !reqID.MatchString(id) {
-			t.Errorf("blocked X-Ailuros-Request-Id = %q, want 16 hex characters", id)
+		if id := blocked.Header.Get("X-Decision-Waf-Request-Id"); !reqID.MatchString(id) {
+			t.Errorf("blocked X-Decision-Waf-Request-Id = %q, want 16 hex characters", id)
 		}
 		if echoHas(t, "echo", "/checked/blockedpath") {
 			t.Errorf("a blocked request reached the upstream")
 		}
-		t.Logf("allow -> 200, block -> 403 (request id %s)", blocked.Header.Get("X-Ailuros-Request-Id"))
+		t.Logf("allow -> 200, block -> 403 (request id %s)", blocked.Header.Get("X-Decision-Waf-Request-Id"))
 	})
 
-	t.Run("stacked route: Ailuros before tinyauth", func(t *testing.T) {
+	t.Run("stacked route: decision-waf before tinyauth", func(t *testing.T) {
 		t0 := e.callCount(t, "tinyauth")
 		blocked, _ := do(t, "/stacked/blocked?q=attack", nil)
 		if blocked.StatusCode != 403 {
@@ -351,30 +396,30 @@ func TestNGF(t *testing.T) {
 		if n := e.callCount(t, "tinyauth"); n != t0+1 {
 			t.Errorf("tinyauth calls = %d, want %d", n-t0, 1)
 		}
-		if id := login.Header.Get("X-Ailuros-Request-Id"); !reqID.MatchString(id) {
-			t.Errorf("302 X-Ailuros-Request-Id = %q, want 16 hex characters", id)
+		if id := login.Header.Get("X-Decision-Waf-Request-Id"); !reqID.MatchString(id) {
+			t.Errorf("302 X-Decision-Waf-Request-Id = %q, want 16 hex characters", id)
 		}
 		ok, _ := do(t, "/stacked/hello", map[string]string{"Authorization": "ok"})
 		if ok.StatusCode != 200 {
 			t.Errorf("with credentials: status %d, want 200", ok.StatusCode)
 		}
-		if id := ok.Header.Get("X-Ailuros-Request-Id"); !reqID.MatchString(id) {
-			t.Errorf("200 X-Ailuros-Request-Id = %q, want 16 hex characters", id)
+		if id := ok.Header.Get("X-Decision-Waf-Request-Id"); !reqID.MatchString(id) {
+			t.Errorf("200 X-Decision-Waf-Request-Id = %q, want 16 hex characters", id)
 		}
 	})
 
-	t.Run("Ailuros down: closed 503, open 200", func(t *testing.T) {
-		e.kubectl(t, "scale", "deploy/ailuros", "--replicas=0")
-		e.kubectl(t, "wait", "--for=delete", "pod", "-l", "app=ailuros", "--timeout=120s")
+	t.Run("decision-waf down: closed 503, open 200", func(t *testing.T) {
+		e.kubectl(t, "scale", "deploy/decision-waf", "--replicas=0")
+		e.kubectl(t, "wait", "--for=delete", "pod", "-l", "app=decision-waf", "--timeout=120s")
 		before, _ := e.kubectlTry(t, "logs", "deploy/gateway-nginx", "-c", "nginx")
 
 		closed, _ := do(t, "/checked/down-closed", nil)
 		if closed.StatusCode != 503 {
-			t.Errorf("checked, Ailuros down: status %d, want 503", closed.StatusCode)
+			t.Errorf("checked, decision-waf down: status %d, want 503", closed.StatusCode)
 		}
 		open, _ := do(t, "/open/down-open", nil)
 		if open.StatusCode != 200 {
-			t.Errorf("open, Ailuros down: status %d, want 200", open.StatusCode)
+			t.Errorf("open, decision-waf down: status %d, want 200", open.StatusCode)
 		}
 		if echoHas(t, "echo", "/checked/down-closed") {
 			t.Errorf("a fail-closed request reached the upstream")
@@ -386,12 +431,12 @@ func TestNGF(t *testing.T) {
 		var rejected, warned bool
 		for _, line := range strings.Split(strings.TrimPrefix(after, before), "\n") {
 			if strings.Contains(line, "[error]") && strings.Contains(line, "request: \"GET /checked/down-closed") &&
-				strings.Contains(line, "rejecting the request with 503") && strings.Contains(line, "ailuros_request_unavailable closed") {
+				strings.Contains(line, "rejecting the request with 503") && strings.Contains(line, "decision_waf_request_unavailable closed") {
 				rejected = true
 				t.Logf("error: %s", line)
 			}
 			if strings.Contains(line, "[warn]") && strings.Contains(line, "request: \"GET /open/down-open") &&
-				strings.Contains(line, "letting the request through") && strings.Contains(line, "ailuros_request_unavailable open") {
+				strings.Contains(line, "letting the request through") && strings.Contains(line, "decision_waf_request_unavailable open") {
 				warned = true
 				t.Logf("warning: %s", line)
 			}
@@ -472,7 +517,7 @@ func (e *env) diagnostics(t *testing.T) {
 		{"describe", "gateway", "gateway"},
 		{"logs", "-n", "nginx-gateway", "deploy/ngf-nginx-gateway-fabric", "--tail=80"},
 		{"logs", "deploy/gateway-nginx", "-c", "nginx", "--tail=80"},
-		{"logs", "deploy/ailuros", "--tail=40"},
+		{"logs", "deploy/decision-waf", "--tail=40"},
 	} {
 		out, _ := e.kubectlTry(t, args...)
 		t.Logf("kubectl %s:\n%s", strings.Join(args, " "), out)
@@ -517,34 +562,27 @@ spec:
 	return stubDeploy("model", "model", "8000") +
 		stubDeploy("tinyauth", "tinyauth", "3000") +
 		stubDeploy("echo", "echo", "8080") +
-		stubDeploy("spoof", "echo", "8080", "-resp-header", "X-Ailuros-Request-Id: spoofed0123456789") + `apiVersion: apps/v1
+		stubDeploy("spoof", "echo", "8080", "-resp-header", "X-Decision-Waf-Request-Id: spoofed0123456789") + `apiVersion: apps/v1
 kind: Deployment
-metadata: {name: ailuros}
+metadata: {name: decision-waf}
 spec:
   replicas: 1
-  selector: {matchLabels: {app: ailuros}}
+  selector: {matchLabels: {app: decision-waf}}
   template:
-    metadata: {labels: {app: ailuros}}
+    metadata: {labels: {app: decision-waf}}
     spec:
       containers:
-        - name: ailuros
-          image: ` + ailurosImage + `
+        - name: decision-waf
+          image: ` + legacyAilurosImage + `
           env:
-            - {name: AILUROS_INSPECTION_MODE, value: lite}
-            - {name: AILUROS_CLASSIFIER_BACKEND, value: openai}
-            - {name: AILUROS_CLASSIFIER_BASE_URL, value: "http://model.default.svc.cluster.local:8000/v1"}
-            - {name: AILUROS_CLASSIFIER_MODEL, value: stub}
-            - {name: AILUROS_FORWARDAUTH_ADDR, value: ":9002"}
-            - {name: AILUROS_EXTPROC_ADDR, value: ""}
-            - {name: AILUROS_EXTAUTHZ_ADDR, value: ""}
-          ports: [{containerPort: 9002}, {containerPort: 9090}]
+` + backendEnv() + `          ports: [{containerPort: 9002}, {containerPort: 9090}]
           readinessProbe: {httpGet: {path: /readyz, port: 9090}}
 ---
 apiVersion: v1
 kind: Service
-metadata: {name: ailuros}
+metadata: {name: decision-waf}
 spec:
-  selector: {app: ailuros}
+  selector: {app: decision-waf}
   ports:
     - {name: forwardauth, port: 9002, targetPort: 9002}
 `
@@ -579,8 +617,8 @@ spec:
       value: |
         auth_request /_tinyauth;
         error_page 401 =302 http://login.example.test/login;
-` + routes("plain", "echo", nil) + routes("spoof", "spoof", nil) + routes("checked", "echo", []string{"ailuros-check"}) +
-	routes("stacked", "echo", []string{"ailuros-check", "tinyauth"}) + routes("open", "echo", []string{"ailuros-check-open"})
+` + routes("plain", "echo", nil) + routes("spoof", "spoof", nil) + routes("checked", "echo", []string{"decision-waf-check"}) +
+	routes("stacked", "echo", []string{"decision-waf-check", "tinyauth"}) + routes("open", "echo", []string{"decision-waf-check-open"})
 
 func routes(name, backend string, filters []string) string {
 	var f string

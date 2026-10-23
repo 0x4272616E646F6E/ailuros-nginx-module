@@ -8,7 +8,7 @@ import (
 
 // modelHandler is the "model" role: an OpenAI-compatible chat completions
 // endpoint for the real decision-waf's OpenAI backend. It answers {"category":
-// "sqli"} when the last user message contains "attack" and {"category":
+// "injection"} when the last user message contains "attack" and {"category":
 // "benign"} otherwise, as choices[0].message.content, with no logprobs. It
 // accepts every request format decision-waf's startup probe tries (json_schema
 // and logprobs first), so the probe succeeds on its first attempt, finds no
@@ -41,7 +41,7 @@ func modelHandler(s *state) http.HandlerFunc {
 		}
 		category := "benign"
 		if strings.Contains(user, "attack") {
-			category = "sqli"
+			category = "injection"
 		}
 		content, _ := json.Marshal(map[string]string{"category": category})
 		w.Header().Set("Content-Type", "application/json")

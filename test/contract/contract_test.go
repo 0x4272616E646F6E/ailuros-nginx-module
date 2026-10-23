@@ -17,8 +17,8 @@ import (
 	"github.com/0x4272616E646F6E/decision-waf-nginx-module/test/harness"
 )
 
-// decisionWafImage is ghcr.io/0x4272616e646f6e/decision-waf:0.2.0, pinned by digest.
-const decisionWafImage = "ghcr.io/0x4272616e646f6e/decision-waf@sha256:da85c874cc7ec37bc4517cc503baf567c06b33e5a7bcabe8d10eb091b6e7830d"
+// decisionWafImage is ghcr.io/0x4272616e646f6e/decision-waf:0.3.0, pinned by digest.
+const decisionWafImage = "ghcr.io/0x4272616e646f6e/decision-waf@sha256:95c3dc5c4bccd071fbe21d9775b7daf0cf35f99c78bc77a33cb41134762f1f7d"
 
 func decisionWafEnv() map[string]string {
 	return map[string]string{
